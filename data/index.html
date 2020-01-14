@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta name = 'viewport' content='width=device-width, initial-scale=1', charset = "utf-8">
+		<link rel = "stylesheet" type = "text/css" href = "main.css">
+	</head>
+	<body onload="process()">
+		<table>
+			<tr>
+				<td>Running Time: </td>
+				<td id='i_rt'>----.--:--:--</td>				
+			</tr>
+			<tr>
+				<td colspan="2">
+					<button value ='rt_rst' type='submit' onclick="push_butt(this.value)">Reset running time</button>
+					<hr>
+				</td>
+			</tr>
+			<tr>
+				<td colspan="2">
+					AP Settings<br><br>
+					<form action="/wifi_param"  method="post">						
+						<label for="wifi_ssid">SSID: </label><br>
+						<input type="text" name="wifi_ssid" value=""><br>
+						<label for="wifi_pass">Password: </label><br>
+						<input type="password" name="wifi_pass"><br><br>
+						<input type="submit" value="Confirm">
+					</form>
+					<hr>
+				</td>				
+			</tr>	
+			<tr>
+				<td colspan="2"><a href='/update'><button id='butFWUpdate'>FW / FS Update</button></a></td>
+			</tr>
+		</table>
+			
+		<script>
+			var xmlHttp = createXmlHttpObject();
+			function createXmlHttpObject() {
+				if(window.XMLHttpRequest) {
+					xmlHttp = new XMLHttpRequest();
+				} else {
+					xmlHttp = new ActiveXObject('Microsoft.XMLHTTP');
+				}
+				return xmlHttp;
+			}
+			
+			function process() {
+				if((xmlHttp.readyState == 0) || (xmlHttp.readyState == 4)) {
+					xmlHttp.onreadystatechange = function() {
+						if((xmlHttp.readyState == 4) && (xmlHttp.status == 200)) {
+							xmlDoc = xmlHttp.responseXML;	
+							xmlmsg = xmlDoc.getElementsByTagName('x_rt')[0].firstChild.nodeValue;
+							document.getElementById('i_rt').innerHTML = xmlmsg;	
+						}
+					}
+					xmlHttp.open('PUT', 'xml', true);
+					xmlHttp.send(null);
+				}
+				setTimeout('process()', 1000);	// таймаут запроса XML
+			}	
+		
+			function push_butt(suf) {	
+				if((xmlHttp.readyState == 0) || (xmlHttp.readyState == 4)) {
+					xmlHttp.open('PUT', 'pushButt?buttID=' + suf);
+					xmlHttp.send();
+				}
+			}
+		</script>
+	</body>
+</html> 

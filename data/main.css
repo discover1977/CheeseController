@@ -1,0 +1,26 @@
+* {box-sizing: border-box}
+
+/* Set height of body and the document to 100% */
+body, html {
+	height: 100%;
+	margin: 0;
+	padding: 8px;
+	font-family: Calibri;
+}
+
+table, th, td {
+	all: none;
+	-border: 1px solid rgb(160, 160, 160);
+	border-collapse: collapse;	
+}
+th, td {
+	padding: 4px;
+	-text-align: center;
+}
+th {
+	-text-align: center;
+}
+tr {
+	padding: 4px;
+	vertical-align: bottom;
+}
