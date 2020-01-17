@@ -9,6 +9,11 @@
 #include <Nextion.h>
 #include <NextionText.h>
 #include <NextionButton.h>
+#include <NextionSlider.h>
+#include <NextionCrop.h>
+
+#define DBG_SERIAL  Serial2
+#define NEX_SERIAL  Serial
 
 #define PARAM_ADDR  (0)
 #define PRG_NUM   10
@@ -34,14 +39,28 @@ enum NexPage {
   NexPSett
 };
 
-Nextion nex(Serial2);
+Nextion nex(NEX_SERIAL);
 /* Past page objects */
 NextionText nTxtPastState(nex, NexPPast, 1, "tPState");
+NextionText nTxtTabMixPP(nex, NexPPast, 20, "tTabMix");
 
 /* Mixer page objects */
+NextionText nTxtCycleTime(nex, NexPMix, 14, "tCycleTime");
+NextionText nTxtCycleNum(nex, NexPMix, 13, "tCycleNum");
+NextionText nTxtPrgTime(nex, NexPMix, 18, "tPtgTime");
 NextionText nTxtProgName(nex, NexPMix, 12, "tProgName");
-NextionButton nButButCCRot(nex, NexPMix, 6, "bCCRot");
-NextionButton nButButCRot(nex, NexPMix, 8, "bCRot");
+NextionText nTxtMotorPwr(nex, NexPMix, 9, "tMotorPwr");
+NextionButton nButMixStartStop(nex, NexPMix, 4, "bMixStartStop");
+NextionButton nButCCRot(nex, NexPMix, 6, "bCCRot");
+NextionButton nButCRot(nex, NexPMix, 8, "bCRot");
+NextionButton nButPrgDec(nex, NexPMix, 3, "bPrgDec");
+NextionButton nButPrgInc(nex, NexPMix, 7, "bPrgInc");
+NextionSlider nSliMotorPwr(nex, NexPMix, 5, "sMotorPwr");
+NextionCrop nCropMPwrDec(nex, NexPMix, 10, "mDecPwr");
+NextionCrop nCropMPwrInc(nex, NexPMix, 11, "mIncPwr");
+
+/* Setting page objects */
+NextionText nTxtTabMixPS(nex, NexPSett, 4, "tTabMix");
 
 struct Param {
   uint64_t FuseMac;         
@@ -57,12 +76,22 @@ struct ProgCycle {
   uint8_t Power;
 };
 
+enum ProgIndex {
+  MixManual = -1
+};
+
 ProgCycle prgCycle[PRG_NUM];
 String prgList[PRG_NUM];
 uint8_t prgCount = 0;
 uint8_t cyclesCount = 0;
 uint8_t HeatingPower = 0;
+uint8_t MotorPower = 25;
 char TxtChar[51];
+uint8_t CurrCycle = 0;
+uint16_t CurrCycleTime = 0;
+uint32_t ProgTime = 0;
+int8_t CurrProg = -1;
+uint8_t Direction = FORWARD;
 
 WebServer server;
 FtpServer ftpSrv;
@@ -80,8 +109,10 @@ struct RunningTime {
 
 struct Flag {
   bool SecondTimer;
-  bool MixEn;
+  bool MixProgEn;
+  bool MixManualEn;
   bool InitLocalTimerVar;
+  bool EndProg;
 } Flag;
 
 hw_timer_t *relayTimer = NULL;
@@ -133,9 +164,6 @@ enum State{
 	Work,
   Pause
 };
-uint8_t CurrentCycle = 0;
-int8_t CurrentProgNumber = 0;
-uint32_t ProgTime = 0;
 
 void motor_ctrl(uint8_t enable, uint8_t direct, uint8_t power) {
 	if(enable == ON) {
@@ -144,10 +172,12 @@ void motor_ctrl(uint8_t enable, uint8_t direct, uint8_t power) {
     if(direct == FORWARD) {
       ledcWrite(PWML_TIMER_CHANN, map(power, 0, 100, 0, 255));
       ledcWrite(PWMR_TIMER_CHANN, 0);
+      //Serial.print(F("Motor ON, CW, power: ")); Serial.print(power); Serial.println(F("%"));
     }
     else {
       ledcWrite(PWML_TIMER_CHANN, 0);
-      ledcWrite(PWML_TIMER_CHANN, map(power, 0, 100, 0, 255));
+      ledcWrite(PWMR_TIMER_CHANN, map(power, 0, 100, 0, 255));
+      //Serial.print(F("Motor ON, CCW, power: ")); Serial.print(power); Serial.println(F("%"));
     }
 	}
 	else {
@@ -155,6 +185,7 @@ void motor_ctrl(uint8_t enable, uint8_t direct, uint8_t power) {
     digitalWrite(ENR_MOTOR_PIN, LOW);
     ledcWrite(PWML_TIMER_CHANN, 0);
     ledcWrite(PWMR_TIMER_CHANN, 0);
+    //Serial.println(F("Motor OFF"));
 	}
 }
 
@@ -165,6 +196,14 @@ uint32_t cycle_time(uint8_t cycle) {
 		result += prgCycle[cycle].Time / prgCycle[cycle].OWTime * prgCycle[cycle].PBRevers;
 	}
 	return result;
+}
+
+uint32_t prog_time(uint8_t prgNum) {
+  uint32_t ret = 0;
+  for(int i = 0; i < cyclesCount; i++) {
+    ret += cycle_time(i);
+  }
+  return ret;
 }
 
 hw_timer_t *secondTimer = NULL;
@@ -181,10 +220,13 @@ void IRAM_ATTR onSecondTimer() {
 		lDirection = FORWARD;
 		lState = Work;
 		lCycleCount = 0;
+    CurrCycleTime = cycle_time(lCycleCount);
+    CurrCycle = 0;
+    ProgTime = prog_time(CurrProg);
 	}
 
   /* Mixer motor control ************************************************/
-  if(Flag.MixEn) {
+  if(Flag.MixProgEn) {
 		if(lCycleCount < cyclesCount) {
 			if(prgCycle[lCycleCount].State == Work) {
 				if(lState == Work) {
@@ -212,11 +254,13 @@ void IRAM_ATTR onSecondTimer() {
 				/*set_power(prgCycle[lCycleCount].Power);*/
 				motor_ctrl(OFF, FORWARD, prgCycle[lCycleCount].Power);
 			}
+      CurrCycleTime--;
 
 			if(++lCycleTime == cycle_time(lCycleCount)) {
 				lCycleTime = 0;
 				lCycleCount++;
-				CurrentCycle = lCycleCount;
+				CurrCycle = lCycleCount;
+        CurrCycleTime = cycle_time(lCycleCount);
 				// beep(30, 1);
 			}
 			ProgTime--;
@@ -227,7 +271,8 @@ void IRAM_ATTR onSecondTimer() {
 			lDirection = FORWARD;
 			lState = Work;
 			lCycleCount = 0;
-			Flag.MixEn = false;
+			Flag.MixProgEn = false;
+      Flag.EndProg = true;
 			//Flag.BeepOnStop = 1;
 		}
 	}
@@ -244,14 +289,14 @@ void save_param() {
 }
 
 void eeprom_init() {
-  Serial.println("EEPROM initialization");
+  DBG_SERIAL.println("EEPROM initialization");
   int eSize = sizeof(Param);
   EEPROM.begin(eSize);
   Param.FuseMac = ESP.getEfuseMac();
   EEPROM.put(PARAM_ADDR, Param);
   EEPROM.end();
-  Serial.println("EEPROM initialization completed");
-  Serial.println("");
+  DBG_SERIAL.println("EEPROM initialization completed");
+  DBG_SERIAL.println("");
 }
 
 /* Функция формирования строки XML данных */
@@ -269,8 +314,8 @@ String build_XML() {
 
 bool loadFromSpiffs(String path) {
   led_ctrl(HIGH);
-  Serial.print(F("Request File: "));
-  Serial.println(path);
+  DBG_SERIAL.print(F("Request File: "));
+  DBG_SERIAL.println(path);
   String dataType = F("text/plain");
   if(path.endsWith(F("/"))) path += F("index.html");
 
@@ -287,8 +332,8 @@ bool loadFromSpiffs(String path) {
   else if(path.endsWith(F(".pdf"))) dataType = F("application/pdf");
   else if(path.endsWith(F(".zip"))) dataType = F("application/zip");
   File dataFile = SPIFFS.open(path.c_str(), "r");
-  Serial.print(F("Load File: "));
-  Serial.println(dataFile.name());
+  DBG_SERIAL.print(F("Load File: "));
+  DBG_SERIAL.println(dataFile.name());
   if (server.hasArg(F("download"))) dataType = F("application/octet-stream");
   if (server.streamFile(dataFile, dataType) != dataFile.size()) {}
 
@@ -303,11 +348,11 @@ void h_XML() {
 }
 
 void h_wifi_param() {
-  Serial.println(F("Apply Wi-Fi parameters"));
+  DBG_SERIAL.println(F("Apply Wi-Fi parameters"));
   String ssid = server.arg(F("wifi_ssid"));
   String pass = server.arg(F("wifi_pass"));
-  Serial.print(F("Wi-Fi SSID: ")); Serial.println(ssid);
-  Serial.print(F("Wi-Fi pass: ")); Serial.println(pass);
+  DBG_SERIAL.print(F("Wi-Fi SSID: ")); DBG_SERIAL.println(ssid);
+  DBG_SERIAL.print(F("Wi-Fi pass: ")); DBG_SERIAL.println(pass);
   server.send(200, F("text/html"), F("Wi-Fi setting is updated, module will be rebooting..."));
   // WiFi.begin(ssid.c_str(), pass.c_str());
   delay(100);
@@ -316,19 +361,19 @@ void h_wifi_param() {
   strcpy(Param.ssid, ssid.c_str());
   strcpy(Param.pass, pass.c_str());
   save_param();
-  Serial.print(F("Param SSID: ")); Serial.println(Param.ssid);
-  Serial.print(F("Param pass: ")); Serial.println(Param.pass);
+  DBG_SERIAL.print(F("Param SSID: ")); DBG_SERIAL.println(Param.ssid);
+  DBG_SERIAL.print(F("Param pass: ")); DBG_SERIAL.println(Param.pass);
   WiFi.mode(WIFI_STA);
   WiFi.begin(Param.ssid, Param.pass);
   delay(500);
   SPIFFS.end();
-  Serial.println(F("Resetting ESP..."));
+  DBG_SERIAL.println(F("Resetting ESP..."));
   ESP.restart();
 }
 
 void handleWebRequests() {
   if(loadFromSpiffs(server.uri())) return;
-  Serial.println(F("File Not Detected"));
+  DBG_SERIAL.println(F("File Not Detected"));
   String message = F("File Not Detected\n\n");
   message += F("URI: ");
   message += server.uri();
@@ -341,7 +386,7 @@ void handleWebRequests() {
     message += " NAME:" + server.argName(i) + "\n VALUE:" + server.arg(i) + "\n";
   }
   server.send(404, F("text/plain"), message);
-  Serial.println(message);
+  DBG_SERIAL.println(message);
 }
 
 /* Обработчик/handler запроса HTML страницы */
@@ -354,18 +399,18 @@ void h_Website() {
 
 void ap_config() {
   sblink(1, 500);
-  Serial.println(F("Wi-Fi AP mode"));
-  Serial.println(F("AP configuring..."));
+  DBG_SERIAL.println(F("Wi-Fi AP mode"));
+  DBG_SERIAL.println(F("AP configuring..."));
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid, ap_pass); 
-  Serial.println(F("done"));
+  DBG_SERIAL.println(F("done"));
   IPAddress myIP = WiFi.softAPIP();
-  Serial.print(F("AP IP address: "));
-  Serial.println(myIP);    
+  DBG_SERIAL.print(F("AP IP address: "));
+  DBG_SERIAL.println(myIP);    
 }
 
 uint8_t readProg(uint8_t progNumber, ProgCycle *pc) {
-  Serial.print(F("Read prog: ")); Serial.println(prgList[progNumber]);
+  DBG_SERIAL.print(F("Read prog: ")); DBG_SERIAL.println(prgList[progNumber]);
   String fn = F("/");
   if(prgList[progNumber].indexOf("\r") != -1) {
     prgList[progNumber].setCharAt((prgList[progNumber].length() - 1), ' ');
@@ -375,11 +420,11 @@ uint8_t readProg(uint8_t progNumber, ProgCycle *pc) {
   fn += F(".csv");
   uint8_t cycleNumber = 0;
   uint8_t si, ei;
-  Serial.print(F("Open file prog: ")); Serial.println(fn);
+  DBG_SERIAL.print(F("Open file prog: ")); DBG_SERIAL.println(fn);
   if(SPIFFS.exists(fn)) {
     File pf = SPIFFS.open(fn, "r");  
     if (!pf) {
-      Serial.println(F("Prog file open failed on read."));
+      DBG_SERIAL.println(F("Prog file open failed on read."));
     } else {
       while(pf.available()) {
         String line = pf.readStringUntil('\n');
@@ -403,7 +448,7 @@ uint8_t readProg(uint8_t progNumber, ProgCycle *pc) {
     }   
   }
   else {
-    Serial.print(F("File: ")); Serial.print(fn); Serial.println(F(" not found!"));
+    DBG_SERIAL.print(F("File: ")); DBG_SERIAL.print(fn); DBG_SERIAL.println(F(" not found!"));
   }
   return cycleNumber;
 }
@@ -412,7 +457,7 @@ int read_progList(String file) {
   uint8_t cnt = 0;  
   File f = SPIFFS.open("/ProgList.txt", "r");
   if (!f) {
-    Serial.println(F("ProgList file open failed."));
+    DBG_SERIAL.println(F("ProgList file open failed."));
   } else {
     while(f.available()) {
       String line = f.readStringUntil('\n');
@@ -424,28 +469,193 @@ int read_progList(String file) {
   return cnt;
 }
 
-void cbNexButCCRot(NextionEventType type, INextionTouchable *widget) {
-  if (type == NEX_EVENT_PUSH) {
+char* strToCharArray(String str) {
+  str.toCharArray(TxtChar, (str.length() + 1));
+  return TxtChar;
+}
 
+char* intToCharArray(int val) {
+  sprintf(TxtChar, "%i", val);
+  return TxtChar;
+}
+
+char* getMPwrCharArr(int val) {
+  sprintf(TxtChar, "%i%%", val);
+  return TxtChar;
+}
+
+/*
+void cbNex_______(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {}
+  else if (type == NEX_EVENT_POP) {}
+}
+*/
+
+void nSendPrgName(int8_t val) {
+  if(val >= 0) {
+    nTxtProgName.setText(strToCharArray(prgList[val]));
+    DBG_SERIAL.print(F("Prog number: ")); DBG_SERIAL.print(val);
+    DBG_SERIAL.print(F(", prg name: ")); DBG_SERIAL.print(prgList[val]);
+    DBG_SERIAL.print(F("(")); DBG_SERIAL.print(TxtChar); DBG_SERIAL.println(F(")"));
   }
-  else if (type == NEX_EVENT_POP) {
-
+  else {
+    nTxtProgName.setText("Manual");
   }
 }
 
-void cbNexButCRot(NextionEventType type, INextionTouchable *widget) {
+void nSendMotorPwr(uint8_t val) {
+  nTxtMotorPwr.setText(getMPwrCharArr(val));
+}
+
+void nSendButMixStartStopTxt(String str) {
+  nButMixStartStop.setText(strToCharArray(str));
+}
+
+void cbButMixStartStop(NextionEventType type, INextionTouchable *widget) {
   if (type == NEX_EVENT_PUSH) {
-
+    if(CurrProg == MixManual) {
+      if(!Flag.MixManualEn) {
+        Flag.MixManualEn = true;
+        motor_ctrl(ON, Direction, MotorPower);
+        nSendButMixStartStopTxt("Stop");
+      }
+      else {
+        Flag.MixManualEn = false;
+        motor_ctrl(OFF, Direction, MotorPower);
+        nSendButMixStartStopTxt("Start");
+      }
+    }
+    else {
+      if(!Flag.MixProgEn) {        
+        Flag.InitLocalTimerVar = true;
+        Flag.MixProgEn = true;
+        nSendButMixStartStopTxt("Stop");
+      }
+      else {
+        Flag.MixProgEn = false;
+        motor_ctrl(OFF, FORWARD, 0);
+        nSendButMixStartStopTxt("Start");
+      }
+    }
   }
-  else if (type == NEX_EVENT_POP) {
+  else if (type == NEX_EVENT_POP) {}
+}
 
+void getProgTimeStr(uint32_t t, char* txt) {
+  uint8_t h = 0, m = 0, s = 0;
+    s = t % 60;
+    t /= 60;
+    m = t % 60;
+    h = t / 60;
+    sprintf(TxtChar, "%i:%02i:%02i", h, m, s);
+}
+
+void nSendProgTime() {
+  getProgTimeStr(prog_time(CurrProg), TxtChar);
+  if(CurrProg != MixManual) {
+    nTxtPrgTime.setText(TxtChar);
+  }
+  else nTxtPrgTime.setText("-/--/--");
+}
+
+void cbButPrgDec(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    if(!Flag.MixProgEn) {
+      if(--CurrProg < -1) CurrProg = (prgCount - 1);
+      readProg(CurrProg, prgCycle);
+      nSendPrgName(CurrProg);
+      nSendProgTime();
+    }
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbButPrgInc(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    if(!Flag.MixProgEn) {
+      if(++CurrProg == prgCount) CurrProg = -1;
+      readProg(CurrProg, prgCycle);
+      nSendPrgName(CurrProg);
+      nSendProgTime();
+    }
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbButCCRot(NextionEventType type, INextionTouchable *widget) {
+  if((!Flag.MixManualEn) && (!Flag.MixProgEn)) {
+    if (type == NEX_EVENT_PUSH) {
+      motor_ctrl(ON, BACKWARD, MotorPower);  
+      Direction = BACKWARD;  
+    }
+    else if (type == NEX_EVENT_POP) {
+      motor_ctrl(OFF, BACKWARD, 0);
+    }
+  }
+}
+
+void cbButCRot(NextionEventType type, INextionTouchable *widget) {
+  if((!Flag.MixManualEn) && (!Flag.MixProgEn)) {
+    if (type == NEX_EVENT_PUSH) {
+      motor_ctrl(ON, FORWARD, MotorPower);
+      Direction = FORWARD;
+    }
+    else if (type == NEX_EVENT_POP) {
+      motor_ctrl(OFF, FORWARD, 0);
+    }
+  }
+}
+
+void cbTxtTabMix(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    nSendPrgName(CurrProg);
+    nSliMotorPwr.setValue(MotorPower);
+    nSendMotorPwr(MotorPower);
+    nSendProgTime();
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbCropMPwrDec(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    if(MotorPower > 0) MotorPower--;
+    nSendMotorPwr(MotorPower);
+    if(Flag.MixManualEn) {
+      motor_ctrl(ON, Direction, MotorPower);
+    }
+    DBG_SERIAL.print(F("Motor power: ")); DBG_SERIAL.println(MotorPower);
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbCropMPwrInc(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    if(MotorPower < 100) MotorPower++;
+    nSendMotorPwr(MotorPower);
+    if(Flag.MixManualEn) {
+      motor_ctrl(ON, Direction, MotorPower);
+    }
+    DBG_SERIAL.print(F("Motor power: ")); DBG_SERIAL.println(MotorPower);
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbSliMotorPwr(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {}
+  else if (type == NEX_EVENT_POP) {
+    MotorPower = nSliMotorPwr.getValue();
+    if(Flag.MixManualEn) {
+      motor_ctrl(ON, Direction, MotorPower);
+    }
+    //nSendMotorPwr(MotorPower);
+    DBG_SERIAL.print(F("Motor power: ")); DBG_SERIAL.println(MotorPower);
   }
 }
 
 void setup() {
   // put your setup code here, to run once:
-  Serial.begin(115200);
-  Serial2.begin(921600);
+  DBG_SERIAL.begin(921600);
+  NEX_SERIAL.begin(921600);
   nex.init();
 
   pinMode(2, OUTPUT);
@@ -459,10 +669,10 @@ void setup() {
 
   uint8_t WiFiConnTimeOut = 50;
   delay(1000);
-  Serial.println("");
-  Serial.println(F("--- Wi-Fi config ---"));
+  DBG_SERIAL.println("");
+  DBG_SERIAL.println(F("--- Wi-Fi config ---"));
   
-  Serial.println("");
+  DBG_SERIAL.println("");
   int eSize = sizeof(Param);
   EEPROM.begin(eSize);
   EEPROM.get(PARAM_ADDR, Param);
@@ -471,7 +681,7 @@ void setup() {
     ap_config();
   }
   else {
-    Serial.println(F("Wi-Fi STA mode"));
+    DBG_SERIAL.println(F("Wi-Fi STA mode"));
     //Serial.print(F("Param SSID: ")); Serial.println(Param.ssid);
     //Serial.print(F("Param pass: ")); Serial.println(Param.pass);
     WiFi.mode(WIFI_STA);
@@ -479,38 +689,38 @@ void setup() {
     while (WiFi.status() != WL_CONNECTED) {      
       sblink(1, 10);
       delay(190);
-      Serial.print(".");
+      DBG_SERIAL.print(".");
       if(--WiFiConnTimeOut == 0) break;
     }
     if(WiFiConnTimeOut == 0) {
-      Serial.println("");
-      Serial.println(F("Wi-Fi connected timeout"));
+      DBG_SERIAL.println("");
+      DBG_SERIAL.println(F("Wi-Fi connected timeout"));
       ap_config();        
     }
     else {
       sblink(2, 500);
-      Serial.println("");
-      Serial.print(F("STA connected to: ")); 
-      Serial.println(WiFi.SSID());
+      DBG_SERIAL.println("");
+      DBG_SERIAL.print(F("STA connected to: ")); 
+      DBG_SERIAL.println(WiFi.SSID());
       IPAddress myIP = WiFi.localIP();
-      Serial.print(F("Local IP address: ")); Serial.println(myIP);
+      DBG_SERIAL.print(F("Local IP address: ")); DBG_SERIAL.println(myIP);
       WiFi.enableAP(false);
     }
   }
 
-  Serial.println();
+  DBG_SERIAL.println();
 
   delay(1000);
 
   if(SPIFFS.begin(true)) {
-    Serial.println(F("SPIFFS opened!"));
+    DBG_SERIAL.println(F("SPIFFS opened!"));
     ftpSrv.begin(ftpUser, ftpPass); 
-    Serial.println(F("FTP server started!"));
-    Serial.print(F("user: ")); Serial.println(ftpUser);
-    Serial.print(F("pass: ")); Serial.println(ftpPass);
+    DBG_SERIAL.println(F("FTP server started!"));
+    DBG_SERIAL.print(F("user: ")); DBG_SERIAL.println(ftpUser);
+    DBG_SERIAL.print(F("pass: ")); DBG_SERIAL.println(ftpPass);
 
-    Serial.print(F("SPIFFS total bytes: ")); Serial.println(SPIFFS.totalBytes());
-    Serial.print(F("SPIFFS used bytes: ")); Serial.println(SPIFFS.usedBytes());
+    DBG_SERIAL.print(F("SPIFFS total bytes: ")); DBG_SERIAL.println(SPIFFS.totalBytes());
+    DBG_SERIAL.print(F("SPIFFS used bytes: ")); DBG_SERIAL.println(SPIFFS.usedBytes());
   }
   // Регистрация обработчиков
   server.on(F("/"), h_Website);    
@@ -523,28 +733,28 @@ void setup() {
   //eeprom_init();
   //save_param();
   prgCount = read_progList(F("ProgList.txt"));
-  Serial.print(F("Read "));
-  Serial.print(prgCount);
-  Serial.println(F(" prog"));
+  DBG_SERIAL.print(F("Read "));
+  DBG_SERIAL.print(prgCount);
+  DBG_SERIAL.println(F(" prog"));
 
   for(uint i = 0; i < prgCount; i++) {
-    Serial.print(i + 1); Serial.print(F(" - ")); Serial.println(prgList[i]); 
+    DBG_SERIAL.print(i + 1); DBG_SERIAL.print(F(" - ")); DBG_SERIAL.println(prgList[i]); 
   }
 
   cyclesCount = readProg(0, prgCycle);
-  Serial.print(F("Read "));
-  Serial.print(cyclesCount);
-  Serial.print(F(" cycles in "));
-  Serial.print(prgList[0]);
-  Serial.println(F(" prog"));
+  DBG_SERIAL.print(F("Read "));
+  DBG_SERIAL.print(cyclesCount);
+  DBG_SERIAL.print(F(" cycles in "));
+  DBG_SERIAL.print(prgList[0]);
+  DBG_SERIAL.println(F(" prog"));
 
   for(uint i = 0; i < cyclesCount; i++) {
-    Serial.print(F("Cycle: ")); Serial.print(i + 1); Serial.print(F(" - "));
-    Serial.print(prgCycle[i].State); Serial.print(F(", "));
-    Serial.print(prgCycle[i].Time); Serial.print(F(", "));
-    Serial.print(prgCycle[i].OWTime); Serial.print(F(", "));
-    Serial.print(prgCycle[i].PBRevers); Serial.print(F(", "));
-    Serial.println(prgCycle[i].Power);
+    DBG_SERIAL.print(F("Cycle: ")); DBG_SERIAL.print(i + 1); DBG_SERIAL.print(F(" - "));
+    DBG_SERIAL.print(prgCycle[i].State); DBG_SERIAL.print(F(", "));
+    DBG_SERIAL.print(prgCycle[i].Time); DBG_SERIAL.print(F(", "));
+    DBG_SERIAL.print(prgCycle[i].OWTime); DBG_SERIAL.print(F(", "));
+    DBG_SERIAL.print(prgCycle[i].PBRevers); DBG_SERIAL.print(F(", "));
+    DBG_SERIAL.println(prgCycle[i].Power);
   }
 
   ledcSetup(PWML_TIMER_CHANN, PWM_FREQ, PWM_RES_BIT);
@@ -564,10 +774,17 @@ void setup() {
   timerAttachInterrupt(secondTimer, &onSecondTimer, true);
   timerAlarmWrite(secondTimer, 1000000, true);
   timerAlarmEnable(secondTimer);
-  prgList[0].toCharArray(TxtChar, (prgList[0].length() + 1));
-  nTxtProgName.setText(TxtChar);
-  nButButCCRot.attachCallback(&cbNexButCCRot);
-  nButButCRot.attachCallback(&cbNexButCRot);
+
+  nTxtTabMixPP.attachCallback(&cbTxtTabMix);
+  nTxtTabMixPS.attachCallback(&cbTxtTabMix);
+  nButCCRot.attachCallback(&cbButCCRot);
+  nButCRot.attachCallback(&cbButCRot);
+  nButPrgDec.attachCallback(&cbButPrgDec);
+  nButPrgInc.attachCallback(&cbButPrgInc);
+  nCropMPwrDec.attachCallback(&cbCropMPwrDec);
+  nCropMPwrInc.attachCallback(&cbCropMPwrInc);
+  nSliMotorPwr.attachCallback(&cbSliMotorPwr);
+  nButMixStartStop.attachCallback(&cbButMixStartStop);
 }
 
 void loop() {
@@ -580,6 +797,23 @@ void loop() {
 
   if(Flag.SecondTimer) {
     Flag.SecondTimer = false;
-
+    if((Flag.MixProgEn) || (Flag.EndProg)) {      
+      sprintf(TxtChar, "%i/%s", (CurrCycle + 1), ((prgCycle[CurrCycle].State == 1)?("W"):("P")));
+      nTxtCycleNum.setText(TxtChar);
+      if(cycle_time(CurrCycle) < 60) sprintf(TxtChar, "0:%02i", CurrCycleTime);
+      else sprintf(TxtChar, "%i:%02i", (CurrCycleTime / 60), (CurrCycleTime % 60));
+      nTxtCycleTime.setText(TxtChar);     
+      getProgTimeStr(ProgTime, TxtChar);
+      nTxtPrgTime.setText(TxtChar);
+      nSendMotorPwr(prgCycle[CurrCycle].Power);
+      nSliMotorPwr.setValue(prgCycle[CurrCycle].Power);
+      if(Flag.EndProg) {
+        Flag.EndProg = false;
+        nButMixStartStop.setText("Start");
+        nTxtCycleNum.setText("--/-");
+        nTxtCycleTime.setText("--:--");
+        nSendProgTime();
+      }
+    }
   }
 }
