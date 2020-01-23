@@ -5,15 +5,19 @@
 #include <SPIFFS.h>
 #include <WebServer.h>
 #include <EEPROM.h>
-#include <ADS1115.h>
 #include <Nextion.h>
 #include <NextionText.h>
 #include <NextionButton.h>
+#include <NextionRadioButton.h>
 #include <NextionSlider.h>
 #include <NextionCrop.h>
+#include <PID_v1.h>
+#include <Adafruit_ADS1015.h>
+#include <Wire.h>
 
-#define DBG_SERIAL  Serial2
-#define NEX_SERIAL  Serial
+#define DBG_SERIAL  Serial
+#define NEX_SERIAL  Serial2
+#define NEX_BAUD   115200
 
 #define PARAM_ADDR  (0)
 #define PRG_NUM   10
@@ -34,23 +38,44 @@
 #define PWM_RES_BIT 8
 
 enum NexPage {
-  NexPPast,
+  NexPHeat,
   NexPMix,
   NexPSett
 };
 
+Adafruit_ADS1115  adcTemp;
+
 Nextion nex(NEX_SERIAL);
 /* Past page objects */
-NextionText nTxtPastState(nex, NexPPast, 1, "tPState");
-NextionText nTxtTabMixPP(nex, NexPPast, 20, "tTabMix");
+NextionText nTxtPPastP(nex, NexPHeat, 19, "tPHeatH");
+NextionText nTxtPMixP(nex, NexPHeat, 20, "tPMixH");
+NextionText nTxtPSettP(nex, NexPHeat, 21, "tPSettH");
+NextionText nTxtHeatState(nex, NexPHeat, 1, "tHeatState");
+NextionText nTxtHeatStateA(nex, NexPHeat, 23, "tHeatStateA");
+NextionText nTxtPState(nex, NexPHeat, 1, "tPState");
+NextionText nTxtMilkT(nex, NexPHeat, 2, "tMilk_t");
+NextionText nTxtShirtT(nex, NexPHeat, 3, "tShirt_t");
+NextionText nTxtHMode(nex, NexPHeat, 13, "tHMode");
+NextionText nTxtUVal(nex, NexPHeat, 15, "tUVal");
+NextionText nTxtUnit(nex, NexPHeat, 14, "tUnit");
+NextionText nTxtHeatPwr(nex, NexPHeat, 24, "tHeatPwr");
+NextionButton nButHeatUp(nex, NexPHeat, 8, "bHeatUp");
+NextionButton nButHeatDown(nex, NexPHeat, 9, "bHeatDown");
+NextionButton nButHeatStart(nex, NexPHeat, 7, "bHeatStart");
+NextionRadioButton nRButPast(nex, NexPHeat, 4, "rbPast");
+NextionRadioButton nRButPower(nex, NexPHeat, 5, "rbPower");
+NextionRadioButton nRButTemp(nex, NexPHeat, 6, "rbTemp");
 
 /* Mixer page objects */
+NextionText nTxtPHeatM(nex, NexPMix, 15, "tPHeatM");
+NextionText nTxtPMixM(nex, NexPMix, 16, "tPMixM");
+NextionText nTxtPSettM(nex, NexPMix, 17, "tPSettM");
 NextionText nTxtCycleTime(nex, NexPMix, 14, "tCycleTime");
 NextionText nTxtCycleNum(nex, NexPMix, 13, "tCycleNum");
-NextionText nTxtPrgTime(nex, NexPMix, 18, "tPtgTime");
+NextionText nTxtPrgTime(nex, NexPMix, 18, "tProgTime");
 NextionText nTxtProgName(nex, NexPMix, 12, "tProgName");
 NextionText nTxtMotorPwr(nex, NexPMix, 9, "tMotorPwr");
-NextionButton nButMixStartStop(nex, NexPMix, 4, "bMixStartStop");
+NextionButton nButMixStart(nex, NexPMix, 4, "bMixStart");
 NextionButton nButCCRot(nex, NexPMix, 6, "bCCRot");
 NextionButton nButCRot(nex, NexPMix, 8, "bCRot");
 NextionButton nButPrgDec(nex, NexPMix, 3, "bPrgDec");
@@ -60,12 +85,15 @@ NextionCrop nCropMPwrDec(nex, NexPMix, 10, "mDecPwr");
 NextionCrop nCropMPwrInc(nex, NexPMix, 11, "mIncPwr");
 
 /* Setting page objects */
-NextionText nTxtTabMixPS(nex, NexPSett, 4, "tTabMix");
+NextionText nTxtHeatS(nex, NexPSett, 3, "tPHeatS");
+NextionText nTxtPMixS(nex, NexPSett, 4, "tPMixS");
+NextionText nTxtPSettS(nex, NexPSett, 5, "tPSettS");
 
 struct Param {
   uint64_t FuseMac;         
   char ssid[20];
-  char pass[20];          
+  char pass[20];
+  uint8_t SetPointValue[3];
 } Param;  
 
 struct ProgCycle {
@@ -84,15 +112,43 @@ ProgCycle prgCycle[PRG_NUM];
 String prgList[PRG_NUM];
 uint8_t prgCount = 0;
 uint8_t cyclesCount = 0;
-uint8_t HeatingPower = 0;
 uint8_t MotorPower = 25;
-char TxtChar[51];
+char Text[51];
 uint8_t CurrCycle = 0;
 uint16_t CurrCycleTime = 0;
 uint32_t ProgTime = 0;
 int8_t CurrProg = -1;
 uint8_t Direction = FORWARD;
 
+/* Pasteurizer variables */
+enum TempEnum {
+  Milk,
+  Shirt
+};
+double Temperature[2] = {0, 0};
+double PIDSetpoint, PIDInput, PIDOutput;
+double aggKp=10, aggKi=5, aggKd=3;
+double consKp=1, consKi=0.5, consKd=0.5;
+bool consK = false;
+uint16_t PastDelayCnt;
+PID m_PID(&PIDInput, &PIDOutput, &PIDSetpoint, consKp, consKi, consKd, DIRECT);
+enum HeatModeEnum {
+  Past,
+  Power,
+  Temp
+};
+uint8_t HeatingMode = Past;
+enum PastStateEnum {
+  PastStateIdle,
+  PastStateHeating,
+  PastStateDelay
+};
+uint8_t PastState = PastStateIdle;
+uint8_t HeatingPWM = 0;
+char degSymbol[3] = {0};
+char percentSymbol[2] = {'%', 0x00};
+
+/* WEB & FTP server variables */
 WebServer server;
 FtpServer ftpSrv;
 const char* ftpUser = "esp32";
@@ -113,12 +169,13 @@ struct Flag {
   bool MixManualEn;
   bool InitLocalTimerVar;
   bool EndProg;
+  bool HeatingEn;
 } Flag;
 
 hw_timer_t *relayTimer = NULL;
 void IRAM_ATTR onRelayTimer() {
   static uint8_t pwmCnt = 0;
-  if(pwmCnt < HeatingPower) {
+  if(pwmCnt < HeatingPWM) {
     digitalWrite(PWM_RELAY_PIN, HIGH);
   }
   else {
@@ -151,19 +208,16 @@ void sblink(uint8_t rep, uint16_t del) {
   }
 }
 
-int8_t set_power(uint8_t val) {
-	if(val > 100) return -1;
-	else {
-    ledcWrite(0, map(val, 0, 255, 0, 100));
-	}
-	return val;
-}
-
 enum State{
 	Stop,
 	Work,
   Pause
 };
+
+void heating_ctrl(uint8_t val) {
+  if(val > 100) return;
+  HeatingPWM = val;
+}
 
 void motor_ctrl(uint8_t enable, uint8_t direct, uint8_t power) {
 	if(enable == ON) {
@@ -213,6 +267,10 @@ void IRAM_ATTR onSecondTimer() {
 
   Flag.SecondTimer = true;
 
+  if(PastDelayCnt > 0) {
+    PastDelayCnt--;
+  }
+
 	if(Flag.InitLocalTimerVar) {
 		Flag.InitLocalTimerVar = 0;
 		lPTime = 0;
@@ -251,7 +309,6 @@ void IRAM_ATTR onSecondTimer() {
 				}
 			}
 			else {
-				/*set_power(prgCycle[lCycleCount].Power);*/
 				motor_ctrl(OFF, FORWARD, prgCycle[lCycleCount].Power);
 			}
       CurrCycleTime--;
@@ -293,6 +350,9 @@ void eeprom_init() {
   int eSize = sizeof(Param);
   EEPROM.begin(eSize);
   Param.FuseMac = ESP.getEfuseMac();
+  Param.SetPointValue[Past] = 63;
+  Param.SetPointValue[Power] = 50;
+  Param.SetPointValue[Temp] = 40;
   EEPROM.put(PARAM_ADDR, Param);
   EEPROM.end();
   DBG_SERIAL.println("EEPROM initialization completed");
@@ -453,7 +513,7 @@ uint8_t readProg(uint8_t progNumber, ProgCycle *pc) {
   return cycleNumber;
 }
 
-int read_progList(String file) {
+int readProgList(String file) {
   uint8_t cnt = 0;  
   File f = SPIFFS.open("/ProgList.txt", "r");
   if (!f) {
@@ -470,18 +530,18 @@ int read_progList(String file) {
 }
 
 char* strToCharArray(String str) {
-  str.toCharArray(TxtChar, (str.length() + 1));
-  return TxtChar;
+  str.toCharArray(Text, (str.length() + 1));
+  return Text;
 }
 
 char* intToCharArray(int val) {
-  sprintf(TxtChar, "%i", val);
-  return TxtChar;
+  sprintf(Text, "%i", val);
+  return Text;
 }
 
 char* getMPwrCharArr(int val) {
-  sprintf(TxtChar, "%i%%", val);
-  return TxtChar;
+  sprintf(Text, "%i%%", val);
+  return Text;
 }
 
 /*
@@ -490,13 +550,28 @@ void cbNex_______(NextionEventType type, INextionTouchable *widget) {
   else if (type == NEX_EVENT_POP) {}
 }
 */
+char* addDeg(char* s) {
+  int i = strlen(s);
+  s[i++] = '°';
+  s[i++] = 'C';
+  s[i] = 0x00;
+  return s;
+}
+
+void showPastPageData() {
+  nTxtUnit.setText(degSymbol);
+  sprintf(Text, "%i", Param.SetPointValue[HeatingMode]);
+  nTxtUVal.setText(Text);
+  nTxtMilkT.setText(addDeg(dtostrf(Temperature[Milk], 3, 1, Text)));
+  nTxtShirtT.setText(addDeg(dtostrf(Temperature[Shirt], 3, 1, Text)));
+}
 
 void nSendPrgName(int8_t val) {
   if(val >= 0) {
     nTxtProgName.setText(strToCharArray(prgList[val]));
     DBG_SERIAL.print(F("Prog number: ")); DBG_SERIAL.print(val);
     DBG_SERIAL.print(F(", prg name: ")); DBG_SERIAL.print(prgList[val]);
-    DBG_SERIAL.print(F("(")); DBG_SERIAL.print(TxtChar); DBG_SERIAL.println(F(")"));
+    DBG_SERIAL.print(F("(")); DBG_SERIAL.print(Text); DBG_SERIAL.println(F(")"));
   }
   else {
     nTxtProgName.setText("Manual");
@@ -508,7 +583,7 @@ void nSendMotorPwr(uint8_t val) {
 }
 
 void nSendButMixStartStopTxt(String str) {
-  nButMixStartStop.setText(strToCharArray(str));
+  nButMixStart.setText(strToCharArray(str));
 }
 
 void cbButMixStartStop(NextionEventType type, INextionTouchable *widget) {
@@ -541,19 +616,19 @@ void cbButMixStartStop(NextionEventType type, INextionTouchable *widget) {
   else if (type == NEX_EVENT_POP) {}
 }
 
-void getProgTimeStr(uint32_t t, char* txt) {
+void getTimeStrHMS(uint32_t t, char* txt) {
   uint8_t h = 0, m = 0, s = 0;
     s = t % 60;
     t /= 60;
     m = t % 60;
     h = t / 60;
-    sprintf(TxtChar, "%i:%02i:%02i", h, m, s);
+    sprintf(Text, "%i:%02i:%02i", h, m, s);
 }
 
 void nSendProgTime() {
-  getProgTimeStr(prog_time(CurrProg), TxtChar);
+  getTimeStrHMS(prog_time(CurrProg), Text);
   if(CurrProg != MixManual) {
-    nTxtPrgTime.setText(TxtChar);
+    nTxtPrgTime.setText(Text);
   }
   else nTxtPrgTime.setText("-/--/--");
 }
@@ -606,7 +681,7 @@ void cbButCRot(NextionEventType type, INextionTouchable *widget) {
   }
 }
 
-void cbTxtTabMix(NextionEventType type, INextionTouchable *widget) {
+void cbPMixShow(NextionEventType type, INextionTouchable *widget) {
   if (type == NEX_EVENT_PUSH) {
     nSendPrgName(CurrProg);
     nSliMotorPwr.setValue(MotorPower);
@@ -652,11 +727,162 @@ void cbSliMotorPwr(NextionEventType type, INextionTouchable *widget) {
   }
 }
 
+void cbNexRButPast(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    if (!Flag.HeatingEn) {
+      HeatingMode = Past;
+      nTxtHMode.setText("P");
+      nTxtUnit.setText(degSymbol);
+      sprintf(Text, "%i", Param.SetPointValue[HeatingMode]);
+      nTxtUVal.setText(Text);
+    }
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbNexRButPower(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    if (!Flag.HeatingEn) {
+      HeatingMode = Power;
+      nTxtHMode.setText("W");
+      nTxtUnit.setText(percentSymbol);
+      sprintf(Text, "%i", Param.SetPointValue[HeatingMode]);
+      nTxtUVal.setText(Text);
+    }
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbNexRButTemp(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    if (!Flag.HeatingEn) {
+      HeatingMode = Temp;
+      nTxtHMode.setText("t");
+      nTxtUnit.setText(degSymbol);
+      sprintf(Text, "%i", Param.SetPointValue[HeatingMode]);
+      nTxtUVal.setText(Text);
+    }
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbNexButHeatUp(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    if(Param.SetPointValue[HeatingMode] < 100) Param.SetPointValue[HeatingMode]++;
+    sprintf(Text, "%i", Param.SetPointValue[HeatingMode]);
+    nTxtUVal.setText(Text);
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbNexButHeatDown(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    if(Param.SetPointValue[HeatingMode] > 0) Param.SetPointValue[HeatingMode]--;
+    sprintf(Text, "%i", Param.SetPointValue[HeatingMode]);
+    nTxtUVal.setText(Text);
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbHeatStart(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    if(!Flag.HeatingEn) {
+      DBG_SERIAL.println(F("Start heating!"));
+      Flag.HeatingEn = true;
+      nButHeatStart.setText("Stop");
+      nTxtShirtT.setForegroundColour(NEX_COL_RED);
+      switch (HeatingMode) {
+        case Past: {
+          DBG_SERIAL.println(F("Heating mode - PAST"));
+          PastState = PastStateHeating;
+          PIDSetpoint = (double)Param.SetPointValue[HeatingMode];
+          consK = false;
+        } break;  
+        case Power: {
+          DBG_SERIAL.println(F("Heating mode - POWER"));
+          heating_ctrl(Param.SetPointValue[Power]); break;  
+        }
+        case Temp: {
+          DBG_SERIAL.println(F("Heating mode - TEMP"));
+          PIDSetpoint = (double)Param.SetPointValue[HeatingMode];
+          consK = false;
+        } break; 
+        default: break;
+      }
+    }
+    else {
+      DBG_SERIAL.println(F("Stop heating!"));
+      Flag.HeatingEn = false;
+      nButHeatStart.setText("Start");
+      nTxtShirtT.setForegroundColour(NEX_COL_BLACK);
+      nTxtHeatState.setText("---------");
+      nTxtHeatStateA.setText("---------");
+      heating_ctrl(0);
+      /*switch (HeatingMode) {
+        case Past: {} break;  
+        case Power: {} break;   
+        case Temp: {} break; 
+        default: break;
+      }*/
+      save_param();
+    }
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void i2c_scan() {
+  byte error, address;
+  int nDevices;
+  DBG_SERIAL.println("");
+  DBG_SERIAL.println(F("Scanning..."));
+  nDevices = 0;
+  for(address = 1; address < 127; address++ ) {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+    if (error == 0) {
+      DBG_SERIAL.print(F("I2C device found at address 0x"));
+      if (address<16) {
+        Serial.print(F("0"));
+      }
+      DBG_SERIAL.println(address,HEX);
+      nDevices++;
+    }
+    else if (error==4) {
+      DBG_SERIAL.print(F("Unknow error at address 0x"));
+      if (address<16) {
+        DBG_SERIAL.print(F("0"));
+      }
+      DBG_SERIAL.println(address,HEX);
+    }    
+  }
+  if (nDevices == 0) {
+    DBG_SERIAL.println(F("No I2C devices found\n"));
+  }
+  else {
+    DBG_SERIAL.println(F("done\n"));
+  }
+}
+
+void pidKSelect() {  
+  double gap = abs(PIDSetpoint - PIDInput); //distance away from setpoint
+  if (gap < 5.0) {  //we're close to setpoint, use conservative tuning parameters
+    m_PID.SetTunings(consKp, consKi, consKd);      
+    consK = true;
+  }
+  else {
+    //we're far from setpoint, use aggressive tuning parameters
+    m_PID.SetTunings(aggKp, aggKi, aggKd);
+  }
+}
+
 void setup() {
   // put your setup code here, to run once:
   DBG_SERIAL.begin(921600);
-  NEX_SERIAL.begin(921600);
-  nex.init();
+  NEX_SERIAL.begin(NEX_BAUD);
+  Wire.begin(21, 22, 400000);
+  i2c_scan();
+  adcTemp.begin();
+  adcTemp.setGain(GAIN_FOUR);
 
   pinMode(2, OUTPUT);
   pinMode(ENL_MOTOR_PIN, OUTPUT);
@@ -732,7 +958,7 @@ void setup() {
 
   //eeprom_init();
   //save_param();
-  prgCount = read_progList(F("ProgList.txt"));
+  prgCount = readProgList(F("ProgList.txt"));
   DBG_SERIAL.print(F("Read "));
   DBG_SERIAL.print(prgCount);
   DBG_SERIAL.println(F(" prog"));
@@ -775,8 +1001,18 @@ void setup() {
   timerAlarmWrite(secondTimer, 1000000, true);
   timerAlarmEnable(secondTimer);
 
-  nTxtTabMixPP.attachCallback(&cbTxtTabMix);
-  nTxtTabMixPS.attachCallback(&cbTxtTabMix);
+  nex.init();
+
+  /* Nextion HEATING page callbacks */
+  nTxtPMixP.attachCallback(&cbPMixShow);
+  nRButPast.attachCallback(&cbNexRButPast);
+  nRButPower.attachCallback(&cbNexRButPower);
+  nRButTemp.attachCallback(&cbNexRButTemp);
+  nButHeatUp.attachCallback(&cbNexButHeatUp);
+  nButHeatDown.attachCallback(&cbNexButHeatDown);
+  nButHeatStart.attachCallback(&cbHeatStart);
+
+  /* Nextion MIX page callbacks */
   nButCCRot.attachCallback(&cbButCCRot);
   nButCRot.attachCallback(&cbButCRot);
   nButPrgDec.attachCallback(&cbButPrgDec);
@@ -784,7 +1020,22 @@ void setup() {
   nCropMPwrDec.attachCallback(&cbCropMPwrDec);
   nCropMPwrInc.attachCallback(&cbCropMPwrInc);
   nSliMotorPwr.attachCallback(&cbSliMotorPwr);
-  nButMixStartStop.attachCallback(&cbButMixStartStop);
+  nButMixStart.attachCallback(&cbButMixStartStop);
+
+  /* Nextion SETT page callbacks */
+  nTxtPMixS.attachCallback(&cbPMixShow);
+
+  addDeg(degSymbol);
+
+  HeatingMode = Past;
+  nTxtHMode.setText("P");
+  showPastPageData();
+  PIDSetpoint = (double)Param.SetPointValue[HeatingMode];
+
+  //turn the PID on
+  m_PID.SetSampleTime(1000);
+  m_PID.SetOutputLimits(0.0, 100.0);
+  m_PID.SetMode(AUTOMATIC);
 }
 
 void loop() {
@@ -797,23 +1048,116 @@ void loop() {
 
   if(Flag.SecondTimer) {
     Flag.SecondTimer = false;
+
+    Temperature[Milk] = adcTemp.readADC_SingleEnded(Milk) * 0.003125;
+    Temperature[Shirt] = adcTemp.readADC_SingleEnded(Shirt) * 0.003125;
+    nTxtMilkT.setText(addDeg(dtostrf(Temperature[Milk], 3, 1, Text)));
+    nTxtShirtT.setText(addDeg(dtostrf(Temperature[Shirt], 3, 1, Text)));    
+    PIDInput = Temperature[Milk];
+    // DBG_SERIAL.print(F("Milk: ")); DBG_SERIAL.println(Temperature[Milk]);
+    // DBG_SERIAL.print(F("Shirt: ")); DBG_SERIAL.println(Temperature[Shirt]);
+
+    /* Heating ***********************************************************************************/ 
+    if(Flag.HeatingEn) {
+      sprintf(Text, "%i%%", HeatingPWM);
+      if(!consK) nTxtHeatPwr.setForegroundColour(NEX_COL_RED);
+      else nTxtHeatPwr.setForegroundColour(NEX_COL_YELLOW);
+      nTxtHeatPwr.setText(Text);
+      if(HeatingMode == Past) {
+        if(PastState == PastStateHeating) nTxtHeatState.setText("Heating");
+        if(PastState == PastStateDelay) {
+          nTxtHeatState.setText("Delay");
+          getTimeStrHMS(PastDelayCnt, Text);
+          nTxtHeatStateA.setText(Text);
+        }
+      }
+      if(HeatingMode == Power) {
+        nTxtHeatState.setText("Heating");
+        nTxtHeatStateA.setText("---------");
+      }
+      if(HeatingMode == Temp) {
+        nTxtHeatState.setText("Heating");
+        nTxtHeatStateA.setText("---------");
+      }      
+    }
+    else {
+      if(PastState == PastStateDelay) {
+        nTxtHeatState.setText("---------");
+        nTxtHeatStateA.setText("---------");
+        nTxtHeatPwr.setForegroundColour(NEX_COL_BLACK);
+        nTxtHeatPwr.setText("-----");
+        nButHeatStart.setText("Stop");
+        PastState == PastStateIdle;
+      }
+    }
+
+    if(Flag.HeatingEn) {
+      switch (HeatingMode) {
+        case Past: {
+          pidKSelect();
+          m_PID.Compute();
+          HeatingPWM = (uint8_t)PIDOutput;
+          switch (PastState) {
+            case PastStateHeating : {
+              //pidKSelect();
+              //m_PID.Compute();
+              //HeatingPWM = (uint8_t)PIDOutput;
+              if(Temperature[Milk] >= (double)Param.SetPointValue[Past]) {
+                PastDelayCnt = 30;
+                PastState = PastStateDelay;
+              }
+            } break;
+            case PastStateDelay : {
+              //pidKSelect();
+              //m_PID.Compute();
+              //HeatingPWM = (uint8_t)PIDOutput;
+              if(PastDelayCnt == 0) {
+                HeatingPWM = 0;
+                Flag.HeatingEn = false;
+              }
+            } break;        
+            default: break;
+          }
+        } break;  
+
+        case Power:{
+          heating_ctrl(Param.SetPointValue[HeatingMode]);
+        } break;  
+
+        case Temp:{
+          pidKSelect();
+          m_PID.Compute();
+          HeatingPWM = (uint8_t)PIDOutput;
+          if(Temperature[Milk] >= Param.SetPointValue[Temp]) {
+            HeatingPWM = 0;
+            Flag.HeatingEn = false;
+          }
+        } break; 
+
+      default: break;
+      }
+    }
+    /*********************************************************************************** Heating */ 
+
+    /* Mixer *************************************************************************************/
     if((Flag.MixProgEn) || (Flag.EndProg)) {      
-      sprintf(TxtChar, "%i/%s", (CurrCycle + 1), ((prgCycle[CurrCycle].State == 1)?("W"):("P")));
-      nTxtCycleNum.setText(TxtChar);
-      if(cycle_time(CurrCycle) < 60) sprintf(TxtChar, "0:%02i", CurrCycleTime);
-      else sprintf(TxtChar, "%i:%02i", (CurrCycleTime / 60), (CurrCycleTime % 60));
-      nTxtCycleTime.setText(TxtChar);     
-      getProgTimeStr(ProgTime, TxtChar);
-      nTxtPrgTime.setText(TxtChar);
+      sprintf(Text, "%i/%s", (CurrCycle + 1), ((prgCycle[CurrCycle].State == 1)?("W"):("P")));
+      nTxtCycleNum.setText(Text);
+      if(cycle_time(CurrCycle) < 60) sprintf(Text, "0:%02i", CurrCycleTime);
+      else sprintf(Text, "%i:%02i", (CurrCycleTime / 60), (CurrCycleTime % 60));
+      nTxtCycleTime.setText(Text);     
+      getTimeStrHMS(ProgTime, Text);
+      nTxtPrgTime.setText(Text);
       nSendMotorPwr(prgCycle[CurrCycle].Power);
       nSliMotorPwr.setValue(prgCycle[CurrCycle].Power);
       if(Flag.EndProg) {
         Flag.EndProg = false;
-        nButMixStartStop.setText("Start");
+        nButMixStart.setText("Start");
         nTxtCycleNum.setText("--/-");
         nTxtCycleTime.setText("--:--");
         nSendProgTime();
       }
     }
+    /************************************************************************************* Mixer */
   }
 }
