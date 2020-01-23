@@ -266,6 +266,9 @@ void IRAM_ATTR onSecondTimer() {
   static uint16_t lCycleTime = 0, lPTime = 0, lRTime = 0, lDirection = FORWARD, lState = Work;
 
   Flag.SecondTimer = true;
+  //static uint16_t cnt = 0;
+  //DBG_SERIAL.print("onSecondTimer cnt: "); DBG_SERIAL.println(cnt++);
+  //DBG_SERIAL.print("Flag.SecondTimer: "); DBG_SERIAL.println(Flag.SecondTimer);
 
   if(PastDelayCnt > 0) {
     PastDelayCnt--;
@@ -875,24 +878,12 @@ void pidKSelect() {
   }
 }
 
-void setup() {
-  // put your setup code here, to run once:
-  DBG_SERIAL.begin(921600);
-  NEX_SERIAL.begin(NEX_BAUD);
-  Wire.begin(21, 22, 400000);
-  i2c_scan();
-  adcTemp.begin();
-  adcTemp.setGain(GAIN_FOUR);
+TaskHandle_t Task1;
+//TaskHandle_t Task2;
 
-  pinMode(2, OUTPUT);
-  pinMode(ENL_MOTOR_PIN, OUTPUT);
-  pinMode(ENR_MOTOR_PIN, OUTPUT);
-  pinMode(PWML_MOTOR_PIN, OUTPUT);
-  pinMode(PWMR_MOTOR_PIN, OUTPUT);
-  pinMode(PWM_RELAY_PIN, OUTPUT);
-
-  sblink(20, 20);
-
+void Task1code( void * pvParameters ) {
+  DBG_SERIAL.print("Task1 running on core ");
+  DBG_SERIAL.println(xPortGetCoreID());
   uint8_t WiFiConnTimeOut = 50;
   delay(1000);
   DBG_SERIAL.println("");
@@ -948,16 +939,7 @@ void setup() {
     DBG_SERIAL.print(F("SPIFFS total bytes: ")); DBG_SERIAL.println(SPIFFS.totalBytes());
     DBG_SERIAL.print(F("SPIFFS used bytes: ")); DBG_SERIAL.println(SPIFFS.usedBytes());
   }
-  // Регистрация обработчиков
-  server.on(F("/"), h_Website);    
-  server.on(F("/wifi_param"), h_wifi_param); 
-  //server.on(F("/pushButt"), h_pushButt);    
-  server.onNotFound(handleWebRequests);       
-  server.on(F("/xml"), h_XML);
-  server.begin();
 
-  //eeprom_init();
-  //save_param();
   prgCount = readProgList(F("ProgList.txt"));
   DBG_SERIAL.print(F("Read "));
   DBG_SERIAL.print(prgCount);
@@ -983,6 +965,49 @@ void setup() {
     DBG_SERIAL.println(prgCycle[i].Power);
   }
 
+  // Регистрация обработчиков
+  server.on(F("/"), h_Website);    
+  server.on(F("/wifi_param"), h_wifi_param); 
+  //server.on(F("/pushButt"), h_pushButt);    
+  server.onNotFound(handleWebRequests);       
+  server.on(F("/xml"), h_XML);
+  server.begin();
+
+  for(;;){
+    /* Обработка запросов HTML клиента */
+    server.handleClient();
+    /* Обработка запросов FTP клиента */
+    ftpSrv.handleFTP();
+    /* Обработка сообщений Nextion дисплея */
+    nex.poll();
+    delay(10);
+  }
+}
+
+void setup() {
+  // put your setup code here, to run once:
+  DBG_SERIAL.begin(921600);
+
+  NEX_SERIAL.begin(NEX_BAUD);
+  NEX_SERIAL.setRxBufferSize(100);
+  nex.init();
+
+  Wire.begin(21, 22, 400000);
+  i2c_scan();
+  adcTemp.begin();
+  adcTemp.setGain(GAIN_FOUR);
+
+  pinMode(2, OUTPUT);
+  pinMode(ENL_MOTOR_PIN, OUTPUT);
+  pinMode(ENR_MOTOR_PIN, OUTPUT);
+  pinMode(PWML_MOTOR_PIN, OUTPUT);
+  pinMode(PWMR_MOTOR_PIN, OUTPUT);
+  pinMode(PWM_RELAY_PIN, OUTPUT);
+
+  sblink(20, 20);
+
+  //eeprom_init();
+  //save_param();
   ledcSetup(PWML_TIMER_CHANN, PWM_FREQ, PWM_RES_BIT);
   ledcAttachPin(PWML_MOTOR_PIN, PWML_TIMER_CHANN);
   ledcWrite(PWML_TIMER_CHANN, 0);
@@ -1000,8 +1025,6 @@ void setup() {
   timerAttachInterrupt(secondTimer, &onSecondTimer, true);
   timerAlarmWrite(secondTimer, 1000000, true);
   timerAlarmEnable(secondTimer);
-
-  nex.init();
 
   /* Nextion HEATING page callbacks */
   nTxtPMixP.attachCallback(&cbPMixShow);
@@ -1036,32 +1059,36 @@ void setup() {
   m_PID.SetSampleTime(1000);
   m_PID.SetOutputLimits(0.0, 100.0);
   m_PID.SetMode(AUTOMATIC);
+
+  // Создаем задачу с кодом из функции Task1code(),
+  // с приоритетом 1 и выполняемую на ядре 0:
+  xTaskCreatePinnedToCore(
+                    Task1code,   /* Функция задачи */
+                    "Task1",     /* Название задачи */
+                    50000,       /* Размер стека задачи */
+                    NULL,        /* Параметр задачи */
+                    1,           /* Приоритет задачи */
+                    &Task1,      /* Идентификатор задачи,
+                                    чтобы ее можно было отслеживать */
+                    0);          /* Ядро для выполнения задачи (0) */                  
+  delay(500);
 }
 
 void loop() {
-  /* Обработка запросов HTML клиента */
-  server.handleClient();
-  /* Обработка запросов FTP клиента */
-  ftpSrv.handleFTP();
-  /* Обработка сообщений Nextion дисплея */
-  nex.poll();
-
   if(Flag.SecondTimer) {
     Flag.SecondTimer = false;
-
+    
     Temperature[Milk] = adcTemp.readADC_SingleEnded(Milk) * 0.003125;
     Temperature[Shirt] = adcTemp.readADC_SingleEnded(Shirt) * 0.003125;
     nTxtMilkT.setText(addDeg(dtostrf(Temperature[Milk], 3, 1, Text)));
     nTxtShirtT.setText(addDeg(dtostrf(Temperature[Shirt], 3, 1, Text)));    
     PIDInput = Temperature[Milk];
-    // DBG_SERIAL.print(F("Milk: ")); DBG_SERIAL.println(Temperature[Milk]);
-    // DBG_SERIAL.print(F("Shirt: ")); DBG_SERIAL.println(Temperature[Shirt]);
+    //DBG_SERIAL.print(F("Milk: ")); DBG_SERIAL.println(Temperature[Milk]);
+    //DBG_SERIAL.print(F("Shirt: ")); DBG_SERIAL.println(Temperature[Shirt]);
 
     /* Heating ***********************************************************************************/ 
     if(Flag.HeatingEn) {
-      sprintf(Text, "%i%%", HeatingPWM);
-      if(!consK) nTxtHeatPwr.setForegroundColour(NEX_COL_RED);
-      else nTxtHeatPwr.setForegroundColour(NEX_COL_YELLOW);
+      sprintf(Text, "%i%%%s", HeatingPWM, (HeatingMode == Power)?("   "):((consK)?("(c)"):("(a)")));
       nTxtHeatPwr.setText(Text);
       if(HeatingMode == Past) {
         if(PastState == PastStateHeating) nTxtHeatState.setText("Heating");
@@ -1081,13 +1108,14 @@ void loop() {
       }      
     }
     else {
-      if(PastState == PastStateDelay) {
+      if((PastState == PastStateDelay) ||
+         (HeatingMode == Power) ||
+         (HeatingMode == Temp)) {
         nTxtHeatState.setText("---------");
         nTxtHeatStateA.setText("---------");
-        nTxtHeatPwr.setForegroundColour(NEX_COL_BLACK);
         nTxtHeatPwr.setText("-----");
         nButHeatStart.setText("Stop");
-        PastState == PastStateIdle;
+        PastState = PastStateIdle;
       }
     }
 
@@ -1099,18 +1127,12 @@ void loop() {
           HeatingPWM = (uint8_t)PIDOutput;
           switch (PastState) {
             case PastStateHeating : {
-              //pidKSelect();
-              //m_PID.Compute();
-              //HeatingPWM = (uint8_t)PIDOutput;
               if(Temperature[Milk] >= (double)Param.SetPointValue[Past]) {
                 PastDelayCnt = 30;
                 PastState = PastStateDelay;
               }
             } break;
             case PastStateDelay : {
-              //pidKSelect();
-              //m_PID.Compute();
-              //HeatingPWM = (uint8_t)PIDOutput;
               if(PastDelayCnt == 0) {
                 HeatingPWM = 0;
                 Flag.HeatingEn = false;
