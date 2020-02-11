@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESP8266FtpServer.h>
+#include <ESP32httpUpdate.h>
 #include <FS.h>
 #include <SPIFFS.h>
 #include <WebServer.h>
@@ -9,6 +10,7 @@
 #include <NextionText.h>
 #include <NextionButton.h>
 #include <NextionRadioButton.h>
+#include <NextionSlidingText.h>
 #include <NextionSlider.h>
 #include <NextionCrop.h>
 #include <PID_v1.h>
@@ -16,8 +18,9 @@
 #include <Wire.h>
 
 #define DBG_SERIAL  Serial
+#define DBG_BAUD    921600
 #define NEX_SERIAL  Serial2
-#define NEX_BAUD   115200
+#define NEX_BAUD    921600
 
 #define PARAM_ADDR  (0)
 #define PRG_NUM   10
@@ -38,6 +41,7 @@
 #define PWM_RES_BIT 8
 
 enum NexPage {
+  NexPNone = -1,
   NexPHeat,
   NexPMix,
   NexPSett
@@ -47,9 +51,10 @@ Adafruit_ADS1115  adcTemp;
 
 Nextion nex(NEX_SERIAL);
 /* Past page objects */
-NextionText nTxtPPastP(nex, NexPHeat, 19, "tPHeatH");
-NextionText nTxtPMixP(nex, NexPHeat, 20, "tPMixH");
-NextionText nTxtPSettP(nex, NexPHeat, 21, "tPSettH");
+NextionText nTxtPHeatH(nex, NexPHeat, 17, "tPHeatH");
+NextionText nTxtPMixH(nex, NexPHeat, 18, "tPMixH");
+NextionText nTxtPSettH(nex, NexPHeat, 19, "tPSettH");
+
 NextionText nTxtHeatState(nex, NexPHeat, 1, "tHeatState");
 NextionText nTxtHeatStateA(nex, NexPHeat, 23, "tHeatStateA");
 NextionText nTxtPState(nex, NexPHeat, 1, "tPState");
@@ -70,9 +75,10 @@ NextionRadioButton nRButTemp(nex, NexPHeat, 6, "rbTemp");
 NextionText nTxtPHeatM(nex, NexPMix, 15, "tPHeatM");
 NextionText nTxtPMixM(nex, NexPMix, 16, "tPMixM");
 NextionText nTxtPSettM(nex, NexPMix, 17, "tPSettM");
+
 NextionText nTxtCycleTime(nex, NexPMix, 14, "tCycleTime");
 NextionText nTxtCycleNum(nex, NexPMix, 13, "tCycleNum");
-NextionText nTxtPrgTime(nex, NexPMix, 18, "tProgTime");
+NextionText nTxtProgTime(nex, NexPMix, 18, "tProgTime");
 NextionText nTxtProgName(nex, NexPMix, 12, "tProgName");
 NextionText nTxtMotorPwr(nex, NexPMix, 9, "tMotorPwr");
 NextionButton nButMixStart(nex, NexPMix, 4, "bMixStart");
@@ -85,9 +91,14 @@ NextionCrop nCropMPwrDec(nex, NexPMix, 10, "mDecPwr");
 NextionCrop nCropMPwrInc(nex, NexPMix, 11, "mIncPwr");
 
 /* Setting page objects */
-NextionText nTxtHeatS(nex, NexPSett, 3, "tPHeatS");
+NextionText nTxtPHeatS(nex, NexPSett, 3, "tPHeatS");
 NextionText nTxtPMixS(nex, NexPSett, 4, "tPMixS");
 NextionText nTxtPSettS(nex, NexPSett, 5, "tPSettS");
+
+NextionSlidingText nSTxtAddr(nex, NexPSett, 8, "stAddr");
+NextionText nQrAddr(nex, NexPSett, 6, "qrAddr");
+
+int8_t NPage = NexPHeat;
 
 struct Param {
   uint64_t FuseMac;         
@@ -108,6 +119,8 @@ enum ProgIndex {
   MixManual = -1
 };
 
+TaskHandle_t Task1;
+IPAddress myIP;
 ProgCycle prgCycle[PRG_NUM];
 String prgList[PRG_NUM];
 uint8_t prgCount = 0;
@@ -117,8 +130,9 @@ char Text[51];
 uint8_t CurrCycle = 0;
 uint16_t CurrCycleTime = 0;
 uint32_t ProgTime = 0;
-int8_t CurrProg = -1;
+int8_t CurrProg = MixManual;
 uint8_t Direction = FORWARD;
+int8_t OPower = -1;
 
 /* Pasteurizer variables */
 enum TempEnum {
@@ -127,7 +141,7 @@ enum TempEnum {
 };
 double Temperature[2] = {0, 0};
 double PIDSetpoint, PIDInput, PIDOutput;
-double aggKp=10, aggKi=5, aggKd=3;
+double aggKp=15, aggKi=10, aggKd=5;
 double consKp=1, consKi=0.5, consKd=0.5;
 bool consK = false;
 uint16_t PastDelayCnt;
@@ -170,10 +184,39 @@ struct Flag {
   bool InitLocalTimerVar;
   bool EndProg;
   bool HeatingEn;
+  bool HSecond;
 } Flag;
+
+void log(String str) {
+  DBG_SERIAL.println(str);
+}
+void log(char* str) {
+  DBG_SERIAL.println(str);
+}
+void log(String str, String sArg) {
+  DBG_SERIAL.print(str);
+  DBG_SERIAL.print(": ");
+  DBG_SERIAL.println(sArg);
+}
+void log(char* str, char* sArg) {
+  DBG_SERIAL.print(str);
+  DBG_SERIAL.print(": ");
+  DBG_SERIAL.println(sArg);
+}
+void log(String str, int nArg) {
+  DBG_SERIAL.print(str);
+  DBG_SERIAL.print(": ");
+  DBG_SERIAL.println(nArg);
+}
+void log(char* str, int nArg) {
+  DBG_SERIAL.print(str);
+  DBG_SERIAL.print(": ");
+  DBG_SERIAL.println(nArg);
+}
 
 hw_timer_t *relayTimer = NULL;
 void IRAM_ATTR onRelayTimer() {
+  static uint8_t hsCnt = 0;
   static uint8_t pwmCnt = 0;
   if(pwmCnt < HeatingPWM) {
     digitalWrite(PWM_RELAY_PIN, HIGH);
@@ -182,6 +225,11 @@ void IRAM_ATTR onRelayTimer() {
     digitalWrite(PWM_RELAY_PIN, LOW);
   }
   if(++pwmCnt > 100) pwmCnt = 0;
+
+  if(++hsCnt == 50) {
+    hsCnt = 0;
+    Flag.HSecond = true;
+  }
 }
 
 String get_rt() {
@@ -226,12 +274,12 @@ void motor_ctrl(uint8_t enable, uint8_t direct, uint8_t power) {
     if(direct == FORWARD) {
       ledcWrite(PWML_TIMER_CHANN, map(power, 0, 100, 0, 255));
       ledcWrite(PWMR_TIMER_CHANN, 0);
-      //Serial.print(F("Motor ON, CW, power: ")); Serial.print(power); Serial.println(F("%"));
+      DBG_SERIAL.print(F("Motor ON, CW, power: ")); Serial.print(power); Serial.println(F("%"));
     }
     else {
       ledcWrite(PWML_TIMER_CHANN, 0);
       ledcWrite(PWMR_TIMER_CHANN, map(power, 0, 100, 0, 255));
-      //Serial.print(F("Motor ON, CCW, power: ")); Serial.print(power); Serial.println(F("%"));
+      DBG_SERIAL.print(F("Motor ON, CCW, power: ")); Serial.print(power); Serial.println(F("%"));
     }
 	}
 	else {
@@ -239,7 +287,7 @@ void motor_ctrl(uint8_t enable, uint8_t direct, uint8_t power) {
     digitalWrite(ENR_MOTOR_PIN, LOW);
     ledcWrite(PWML_TIMER_CHANN, 0);
     ledcWrite(PWMR_TIMER_CHANN, 0);
-    //Serial.println(F("Motor OFF"));
+    DBG_SERIAL.println(F("Motor OFF"));
 	}
 }
 
@@ -254,8 +302,11 @@ uint32_t cycle_time(uint8_t cycle) {
 
 uint32_t prog_time(uint8_t prgNum) {
   uint32_t ret = 0;
+  //DBG_SERIAL.print("prog_time func, prgNum: "); DBG_SERIAL.println(prgNum);
+  //DBG_SERIAL.print("cyclesCount: "); DBG_SERIAL.println(cyclesCount);
   for(int i = 0; i < cyclesCount; i++) {
     ret += cycle_time(i);
+    //DBG_SERIAL.print("cycle_time: "); DBG_SERIAL.println(ret);
   }
   return ret;
 }
@@ -434,6 +485,12 @@ void h_wifi_param() {
   ESP.restart();
 }
 
+void h_pushButt() {
+  if(server.arg(F("buttID")) == "updFWBut") {
+    t_httpUpdate_return ret = ESPhttpUpdate.update("http://192.168.1.62/firmware.bin");
+  }
+}
+
 void handleWebRequests() {
   if(loadFromSpiffs(server.uri())) return;
   DBG_SERIAL.println(F("File Not Detected"));
@@ -467,15 +524,15 @@ void ap_config() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid, ap_pass); 
   DBG_SERIAL.println(F("done"));
-  IPAddress myIP = WiFi.softAPIP();
+  myIP = WiFi.softAPIP();
   DBG_SERIAL.print(F("AP IP address: "));
   DBG_SERIAL.println(myIP);    
 }
 
 uint8_t readProg(uint8_t progNumber, ProgCycle *pc) {
-  DBG_SERIAL.print(F("Read prog: ")); DBG_SERIAL.println(prgList[progNumber]);
+  //DBG_SERIAL.print(F("Read prog: ")); DBG_SERIAL.println(prgList[progNumber]);
   String fn = F("/");
-  if(prgList[progNumber].indexOf("\r") != -1) {
+  if(prgList[progNumber].indexOf("\r") != MixManual) {
     prgList[progNumber].setCharAt((prgList[progNumber].length() - 1), ' ');
     prgList[progNumber].trim();
   }
@@ -491,7 +548,7 @@ uint8_t readProg(uint8_t progNumber, ProgCycle *pc) {
     } else {
       while(pf.available()) {
         String line = pf.readStringUntil('\n');
-        //Serial.print(F("Cycle string: ")); Serial.println(line);
+        //DBG_SERIAL.print(F("Cycle string: ")); Serial.println(line);
         pc[cycleNumber].State = (line.substring(0, 1) == "W")?(1):(0);
         si = 2;
         ei = line.indexOf(";", si);
@@ -547,12 +604,10 @@ char* getMPwrCharArr(int val) {
   return Text;
 }
 
-/*
-void cbNex_______(NextionEventType type, INextionTouchable *widget) {
+/*void cbNex_______(NextionEventType type, INextionTouchable *widget) {
   if (type == NEX_EVENT_PUSH) {}
   else if (type == NEX_EVENT_POP) {}
-}
-*/
+}*/
 char* addDeg(char* s) {
   int i = strlen(s);
   s[i++] = '°';
@@ -572,9 +627,6 @@ void showPastPageData() {
 void nSendPrgName(int8_t val) {
   if(val >= 0) {
     nTxtProgName.setText(strToCharArray(prgList[val]));
-    DBG_SERIAL.print(F("Prog number: ")); DBG_SERIAL.print(val);
-    DBG_SERIAL.print(F(", prg name: ")); DBG_SERIAL.print(prgList[val]);
-    DBG_SERIAL.print(F("(")); DBG_SERIAL.print(Text); DBG_SERIAL.println(F(")"));
   }
   else {
     nTxtProgName.setText("Manual");
@@ -589,7 +641,16 @@ void nSendButMixStartStopTxt(String str) {
   nButMixStart.setText(strToCharArray(str));
 }
 
+void nSendIPAddress() {
+  sprintf(Text, "%s", myIP.toString());
+  String str = "http://" + myIP.toString() + "/index.html";
+  str.toCharArray(Text, str.length() + 1);
+  nSTxtAddr.setText(Text);
+  nQrAddr.setText(Text);
+}
+
 void cbButMixStartStop(NextionEventType type, INextionTouchable *widget) {
+  log("cbButMixStartStop");
   if (type == NEX_EVENT_PUSH) {
     if(CurrProg == MixManual) {
       if(!Flag.MixManualEn) {
@@ -631,16 +692,25 @@ void getTimeStrHMS(uint32_t t, char* txt) {
 void nSendProgTime() {
   getTimeStrHMS(prog_time(CurrProg), Text);
   if(CurrProg != MixManual) {
-    nTxtPrgTime.setText(Text);
+    nTxtProgTime.setText(Text);
   }
-  else nTxtPrgTime.setText("-/--/--");
+  else nTxtProgTime.setText("-:--:--");
 }
 
 void cbButPrgDec(NextionEventType type, INextionTouchable *widget) {
   if (type == NEX_EVENT_PUSH) {
-    if(!Flag.MixProgEn) {
-      if(--CurrProg < -1) CurrProg = (prgCount - 1);
-      readProg(CurrProg, prgCycle);
+    if((!Flag.MixProgEn) && (!Flag.MixManualEn)) {
+      if(--CurrProg < MixManual) CurrProg = (prgCount - 1);
+      if(CurrProg != MixManual) {
+        cyclesCount = readProg(CurrProg, prgCycle);
+      }
+      else {
+        nSendMotorPwr(MotorPower);
+        if(OPower != MotorPower) {
+          nSliMotorPwr.setValue(MotorPower);
+          OPower = MotorPower;
+        }
+      }
       nSendPrgName(CurrProg);
       nSendProgTime();
     }
@@ -650,9 +720,18 @@ void cbButPrgDec(NextionEventType type, INextionTouchable *widget) {
 
 void cbButPrgInc(NextionEventType type, INextionTouchable *widget) {
   if (type == NEX_EVENT_PUSH) {
-    if(!Flag.MixProgEn) {
-      if(++CurrProg == prgCount) CurrProg = -1;
-      readProg(CurrProg, prgCycle);
+    if((!Flag.MixProgEn) && (!Flag.MixManualEn)) {
+      if(++CurrProg == prgCount) CurrProg = MixManual;
+      if(CurrProg != MixManual) {
+        cyclesCount = readProg(CurrProg, prgCycle);
+      }
+      else {
+        nSendMotorPwr(MotorPower);
+        if(OPower != MotorPower) {
+          nSliMotorPwr.setValue(MotorPower);
+          OPower = MotorPower;
+        }
+      }
       nSendPrgName(CurrProg);
       nSendProgTime();
     }
@@ -686,12 +765,20 @@ void cbButCRot(NextionEventType type, INextionTouchable *widget) {
 
 void cbPMixShow(NextionEventType type, INextionTouchable *widget) {
   if (type == NEX_EVENT_PUSH) {
+    DBG_SERIAL.print(F("cbPMixShow, CurrProg: ")); DBG_SERIAL.println(CurrProg);
     nSendPrgName(CurrProg);
     nSliMotorPwr.setValue(MotorPower);
     nSendMotorPwr(MotorPower);
     nSendProgTime();
+    NPage = NexPMix;
   }
   else if (type == NEX_EVENT_POP) {}
+}
+
+int8_t getNum(char* txt) {
+  String str = txt;
+  str.remove(str.length() - 1);
+  return str.toInt();
 }
 
 void cbCropMPwrDec(NextionEventType type, INextionTouchable *widget) {
@@ -721,11 +808,11 @@ void cbCropMPwrInc(NextionEventType type, INextionTouchable *widget) {
 void cbSliMotorPwr(NextionEventType type, INextionTouchable *widget) {
   if (type == NEX_EVENT_PUSH) {}
   else if (type == NEX_EVENT_POP) {
-    MotorPower = nSliMotorPwr.getValue();
+    nTxtMotorPwr.getText(Text, 4);
+    MotorPower = getNum(Text);
     if(Flag.MixManualEn) {
       motor_ctrl(ON, Direction, MotorPower);
     }
-    //nSendMotorPwr(MotorPower);
     DBG_SERIAL.print(F("Motor power: ")); DBG_SERIAL.println(MotorPower);
   }
 }
@@ -833,6 +920,21 @@ void cbHeatStart(NextionEventType type, INextionTouchable *widget) {
   else if (type == NEX_EVENT_POP) {}
 }
 
+void cbPHeatShow(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    NPage = NexPHeat;
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbPSettShow(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    NPage = NexPSett;
+    nSendIPAddress();
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
 void i2c_scan() {
   byte error, address;
   int nDevices;
@@ -878,9 +980,6 @@ void pidKSelect() {
   }
 }
 
-TaskHandle_t Task1;
-//TaskHandle_t Task2;
-
 void Task1code( void * pvParameters ) {
   DBG_SERIAL.print("Task1 running on core ");
   DBG_SERIAL.println(xPortGetCoreID());
@@ -899,8 +998,6 @@ void Task1code( void * pvParameters ) {
   }
   else {
     DBG_SERIAL.println(F("Wi-Fi STA mode"));
-    //Serial.print(F("Param SSID: ")); Serial.println(Param.ssid);
-    //Serial.print(F("Param pass: ")); Serial.println(Param.pass);
     WiFi.mode(WIFI_STA);
     WiFi.begin(Param.ssid, Param.pass);
     while (WiFi.status() != WL_CONNECTED) {      
@@ -919,7 +1016,7 @@ void Task1code( void * pvParameters ) {
       DBG_SERIAL.println("");
       DBG_SERIAL.print(F("STA connected to: ")); 
       DBG_SERIAL.println(WiFi.SSID());
-      IPAddress myIP = WiFi.localIP();
+      myIP = WiFi.localIP();
       DBG_SERIAL.print(F("Local IP address: ")); DBG_SERIAL.println(myIP);
       WiFi.enableAP(false);
     }
@@ -949,29 +1046,43 @@ void Task1code( void * pvParameters ) {
     DBG_SERIAL.print(i + 1); DBG_SERIAL.print(F(" - ")); DBG_SERIAL.println(prgList[i]); 
   }
 
-  cyclesCount = readProg(0, prgCycle);
-  DBG_SERIAL.print(F("Read "));
-  DBG_SERIAL.print(cyclesCount);
-  DBG_SERIAL.print(F(" cycles in "));
-  DBG_SERIAL.print(prgList[0]);
-  DBG_SERIAL.println(F(" prog"));
-
-  for(uint i = 0; i < cyclesCount; i++) {
-    DBG_SERIAL.print(F("Cycle: ")); DBG_SERIAL.print(i + 1); DBG_SERIAL.print(F(" - "));
-    DBG_SERIAL.print(prgCycle[i].State); DBG_SERIAL.print(F(", "));
-    DBG_SERIAL.print(prgCycle[i].Time); DBG_SERIAL.print(F(", "));
-    DBG_SERIAL.print(prgCycle[i].OWTime); DBG_SERIAL.print(F(", "));
-    DBG_SERIAL.print(prgCycle[i].PBRevers); DBG_SERIAL.print(F(", "));
-    DBG_SERIAL.println(prgCycle[i].Power);
-  }
-
   // Регистрация обработчиков
   server.on(F("/"), h_Website);    
   server.on(F("/wifi_param"), h_wifi_param); 
-  //server.on(F("/pushButt"), h_pushButt);    
+  server.on(F("/pushButt"), h_pushButt);    
   server.onNotFound(handleWebRequests);       
   server.on(F("/xml"), h_XML);
   server.begin();
+
+  /* Nextion HEATING page callbacks */
+  nTxtPMixH.attachCallback(&cbPMixShow);
+  nTxtPSettH.attachCallback(&cbPSettShow);
+  nRButPast.attachCallback(&cbNexRButPast);
+  nRButPower.attachCallback(&cbNexRButPower);
+  nRButTemp.attachCallback(&cbNexRButTemp);
+  nButHeatUp.attachCallback(&cbNexButHeatUp);
+  nButHeatDown.attachCallback(&cbNexButHeatDown);
+  nButHeatStart.attachCallback(&cbHeatStart);
+
+  /* Nextion MIX page callbacks */
+  nTxtPHeatM.attachCallback(&cbPHeatShow);
+  nTxtPSettM.attachCallback(&cbPSettShow);
+  nButCCRot.attachCallback(&cbButCCRot);
+  nButCRot.attachCallback(&cbButCRot);
+  nButPrgDec.attachCallback(&cbButPrgDec);
+  nButPrgInc.attachCallback(&cbButPrgInc);
+  nCropMPwrDec.attachCallback(&cbCropMPwrDec);
+  nCropMPwrInc.attachCallback(&cbCropMPwrInc);
+  nSliMotorPwr.attachCallback(&cbSliMotorPwr);
+  nButMixStart.attachCallback(&cbButMixStartStop);
+
+  /* Nextion SETT page callbacks */
+  nTxtPHeatS.attachCallback(&cbPHeatShow);
+  nTxtPMixS.attachCallback(&cbPMixShow);
+  nTxtPSettS.attachCallback(&cbPSettShow);
+
+  nTxtHMode.setText("P");
+  showPastPageData();
 
   for(;;){
     /* Обработка запросов HTML клиента */
@@ -980,19 +1091,19 @@ void Task1code( void * pvParameters ) {
     ftpSrv.handleFTP();
     /* Обработка сообщений Nextion дисплея */
     nex.poll();
-    delay(10);
+    delay(50);
   }
 }
 
 void setup() {
   // put your setup code here, to run once:
-  DBG_SERIAL.begin(921600);
+  DBG_SERIAL.begin(DBG_BAUD);
 
   NEX_SERIAL.begin(NEX_BAUD);
   NEX_SERIAL.setRxBufferSize(100);
   nex.init();
-
-  Wire.begin(21, 22, 400000);
+  
+  Wire.begin(SDA, SCL, 400000);
   i2c_scan();
   adcTemp.begin();
   adcTemp.setGain(GAIN_FOUR);
@@ -1026,33 +1137,8 @@ void setup() {
   timerAlarmWrite(secondTimer, 1000000, true);
   timerAlarmEnable(secondTimer);
 
-  /* Nextion HEATING page callbacks */
-  nTxtPMixP.attachCallback(&cbPMixShow);
-  nRButPast.attachCallback(&cbNexRButPast);
-  nRButPower.attachCallback(&cbNexRButPower);
-  nRButTemp.attachCallback(&cbNexRButTemp);
-  nButHeatUp.attachCallback(&cbNexButHeatUp);
-  nButHeatDown.attachCallback(&cbNexButHeatDown);
-  nButHeatStart.attachCallback(&cbHeatStart);
-
-  /* Nextion MIX page callbacks */
-  nButCCRot.attachCallback(&cbButCCRot);
-  nButCRot.attachCallback(&cbButCRot);
-  nButPrgDec.attachCallback(&cbButPrgDec);
-  nButPrgInc.attachCallback(&cbButPrgInc);
-  nCropMPwrDec.attachCallback(&cbCropMPwrDec);
-  nCropMPwrInc.attachCallback(&cbCropMPwrInc);
-  nSliMotorPwr.attachCallback(&cbSliMotorPwr);
-  nButMixStart.attachCallback(&cbButMixStartStop);
-
-  /* Nextion SETT page callbacks */
-  nTxtPMixS.attachCallback(&cbPMixShow);
-
   addDeg(degSymbol);
-
   HeatingMode = Past;
-  nTxtHMode.setText("P");
-  showPastPageData();
   PIDSetpoint = (double)Param.SetPointValue[HeatingMode];
 
   //turn the PID on
@@ -1068,8 +1154,7 @@ void setup() {
                     50000,       /* Размер стека задачи */
                     NULL,        /* Параметр задачи */
                     1,           /* Приоритет задачи */
-                    &Task1,      /* Идентификатор задачи,
-                                    чтобы ее можно было отслеживать */
+                    &Task1,      /* Идентификатор задачи, чтобы ее можно было отслеживать */
                     0);          /* Ядро для выполнения задачи (0) */                  
   delay(500);
 }
@@ -1079,46 +1164,10 @@ void loop() {
     Flag.SecondTimer = false;
     
     Temperature[Milk] = adcTemp.readADC_SingleEnded(Milk) * 0.003125;
-    Temperature[Shirt] = adcTemp.readADC_SingleEnded(Shirt) * 0.003125;
-    nTxtMilkT.setText(addDeg(dtostrf(Temperature[Milk], 3, 1, Text)));
-    nTxtShirtT.setText(addDeg(dtostrf(Temperature[Shirt], 3, 1, Text)));    
+    Temperature[Shirt] = adcTemp.readADC_SingleEnded(Shirt) * 0.003125;   
     PIDInput = Temperature[Milk];
-    //DBG_SERIAL.print(F("Milk: ")); DBG_SERIAL.println(Temperature[Milk]);
-    //DBG_SERIAL.print(F("Shirt: ")); DBG_SERIAL.println(Temperature[Shirt]);
 
-    /* Heating ***********************************************************************************/ 
-    if(Flag.HeatingEn) {
-      sprintf(Text, "%i%%%s", HeatingPWM, (HeatingMode == Power)?("   "):((consK)?("(c)"):("(a)")));
-      nTxtHeatPwr.setText(Text);
-      if(HeatingMode == Past) {
-        if(PastState == PastStateHeating) nTxtHeatState.setText("Heating");
-        if(PastState == PastStateDelay) {
-          nTxtHeatState.setText("Delay");
-          getTimeStrHMS(PastDelayCnt, Text);
-          nTxtHeatStateA.setText(Text);
-        }
-      }
-      if(HeatingMode == Power) {
-        nTxtHeatState.setText("Heating");
-        nTxtHeatStateA.setText("---------");
-      }
-      if(HeatingMode == Temp) {
-        nTxtHeatState.setText("Heating");
-        nTxtHeatStateA.setText("---------");
-      }      
-    }
-    else {
-      if((PastState == PastStateDelay) ||
-         (HeatingMode == Power) ||
-         (HeatingMode == Temp)) {
-        nTxtHeatState.setText("---------");
-        nTxtHeatStateA.setText("---------");
-        nTxtHeatPwr.setText("-----");
-        nButHeatStart.setText("Stop");
-        PastState = PastStateIdle;
-      }
-    }
-
+    /* Heating control ***********************************************************************************/ 
     if(Flag.HeatingEn) {
       switch (HeatingMode) {
         case Past: {
@@ -1159,27 +1208,76 @@ void loop() {
       default: break;
       }
     }
-    /*********************************************************************************** Heating */ 
-
-    /* Mixer *************************************************************************************/
-    if((Flag.MixProgEn) || (Flag.EndProg)) {      
-      sprintf(Text, "%i/%s", (CurrCycle + 1), ((prgCycle[CurrCycle].State == 1)?("W"):("P")));
-      nTxtCycleNum.setText(Text);
-      if(cycle_time(CurrCycle) < 60) sprintf(Text, "0:%02i", CurrCycleTime);
-      else sprintf(Text, "%i:%02i", (CurrCycleTime / 60), (CurrCycleTime % 60));
-      nTxtCycleTime.setText(Text);     
-      getTimeStrHMS(ProgTime, Text);
-      nTxtPrgTime.setText(Text);
-      nSendMotorPwr(prgCycle[CurrCycle].Power);
-      nSliMotorPwr.setValue(prgCycle[CurrCycle].Power);
-      if(Flag.EndProg) {
-        Flag.EndProg = false;
-        nButMixStart.setText("Start");
-        nTxtCycleNum.setText("--/-");
-        nTxtCycleTime.setText("--:--");
-        nSendProgTime();
-      }
-    }
-    /************************************************************************************* Mixer */
+    /* Heating control ***********************************************************************************/  
   }
+  /* Display ********************************************************************************************/
+  if(Flag.HSecond) {
+    Flag.HSecond = false;
+    switch(NPage) {
+      case NexPHeat: {  // Heating display
+        nTxtMilkT.setText(addDeg(dtostrf(Temperature[Milk], 3, 1, Text)));
+        nTxtShirtT.setText(addDeg(dtostrf(Temperature[Shirt], 3, 1, Text))); 
+        if(Flag.HeatingEn) {
+          sprintf(Text, "%i%%%s", HeatingPWM, (HeatingMode == Power)?("   "):((consK)?("(c)"):("(a)")));
+          nTxtHeatPwr.setText(Text);
+          if(HeatingMode == Past) {
+            if(PastState == PastStateHeating) nTxtHeatState.setText("Heating");
+            if(PastState == PastStateDelay) {
+              nTxtHeatState.setText("Delay");
+              getTimeStrHMS(PastDelayCnt, Text);
+              nTxtHeatStateA.setText(Text);
+            }
+          }
+          if((HeatingMode == Power) || (HeatingMode == Temp)){
+            nTxtHeatState.setText("Heating");
+            nTxtHeatStateA.setText("---------");
+          }   
+        }
+        else {
+          if((PastState == PastStateDelay) || (HeatingMode == Power) || (HeatingMode == Temp)) {
+            nTxtHeatState.setText("---------");
+            nTxtHeatStateA.setText("---------");
+            nTxtHeatPwr.setText("-----");
+            nButHeatStart.setText("Start");
+            PastState = PastStateIdle;
+          }
+        } 
+      } break;
+      case NexPMix: { // Mixer display
+        if((Flag.MixProgEn) || (Flag.EndProg)) {      
+          sprintf(Text, "%i/%s", (CurrCycle + 1), ((prgCycle[CurrCycle].State == 1)?("W"):("P")));
+          nTxtCycleNum.setText(Text);
+          if(cycle_time(CurrCycle) < 60) sprintf(Text, "0:%02i", CurrCycleTime);
+          else sprintf(Text, "%i:%02i", (CurrCycleTime / 60), (CurrCycleTime % 60));
+          nTxtCycleTime.setText(Text);     
+          getTimeStrHMS(ProgTime, Text);
+          nTxtProgTime.setText(Text);
+          nSendMotorPwr(prgCycle[CurrCycle].Power);
+          if(OPower != prgCycle[CurrCycle].Power) {
+            nSliMotorPwr.setValue(prgCycle[CurrCycle].Power);
+            OPower = prgCycle[CurrCycle].Power;
+          }
+          if(Flag.EndProg) {
+            Flag.EndProg = false;
+            nButMixStart.setText("Start");
+            nTxtCycleNum.setText("--/-");
+            nTxtCycleTime.setText("--:--");
+            nSendProgTime();
+          }
+        }
+        else if(Flag.MixManualEn) {
+          nSendMotorPwr(MotorPower);
+          if(OPower != MotorPower) {
+            nSliMotorPwr.setValue(MotorPower);
+            OPower = MotorPower;
+          }
+        }
+      } break;
+      case NexPSett: {
+
+      } break;
+      default: break;
+    }
+  }
+  /* Display ********************************************************************************************/
 }
