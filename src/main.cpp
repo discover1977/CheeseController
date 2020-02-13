@@ -97,6 +97,9 @@ NextionText nTxtPSettS(nex, NexPSett, 5, "tPSettS");
 
 NextionSlidingText nSTxtAddr(nex, NexPSett, 8, "stAddr");
 NextionText nQrAddr(nex, NexPSett, 6, "qrAddr");
+NextionButton nButReset(nex, NexPSett, 14, "bRst");
+NextionButton nButFWUpd(nex, NexPSett, 11, "bFWUpd");
+NextionText nTxtUpdStatus(nex, NexPSett, 9, "tUpdStatus");
 
 int8_t NPage = NexPHeat;
 
@@ -485,9 +488,35 @@ void h_wifi_param() {
   ESP.restart();
 }
 
-void h_pushButt() {
-  if(server.arg(F("buttID")) == "updFWBut") {
-    t_httpUpdate_return ret = ESPhttpUpdate.update("http://192.168.1.62/firmware.bin");
+void fw_update() {
+  led_ctrl(HIGH);  
+  log("Update FW");
+  nTxtUpdStatus.setText("Update FW...");
+  // yield();
+  t_httpUpdate_return ret = ESPhttpUpdate.update("https://discover1977.github.io/fw/chc/firmware.bin", "", "", false);
+  led_ctrl(LOW);
+  switch(ret) {
+    case HTTP_UPDATE_FAILED:
+      sprintf(Text, "FW_UPDATE_FAILD Error (%d): %s", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
+      nTxtUpdStatus.setText(Text);
+      DBG_SERIAL.println(Text);
+      break;
+
+    case HTTP_UPDATE_NO_UPDATES:
+      nTxtUpdStatus.setText("FW_UPDATE_NO_UPDATES");
+      DBG_SERIAL.println(F("FW_UPDATE_NO_UPDATES"));
+      break;
+
+    case HTTP_UPDATE_OK:
+      nTxtUpdStatus.setText("FW_UPDATE_OK, please reboot");
+      DBG_SERIAL.println(F("FW_UPDATE_OK"));
+      break;
+  }
+}
+
+void h_pushButt() {  
+  if(server.arg(F("buttID")) == "updFWBut") {  
+    fw_update();
   }
 }
 
@@ -647,6 +676,29 @@ void nSendIPAddress() {
   str.toCharArray(Text, str.length() + 1);
   nSTxtAddr.setText(Text);
   nQrAddr.setText(Text);
+}
+
+void cbButFWUpd(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    fw_update();
+  }
+  else if (type == NEX_EVENT_POP) {}
+}
+
+void cbButReset(NextionEventType type, INextionTouchable *widget) {
+  if (type == NEX_EVENT_PUSH) {
+    int i = 5;
+    while (i){
+      sprintf(Text, "Reboot after: %i second", i--);
+      nTxtUpdStatus.setText(Text);
+      delay(1000);
+    }
+    sprintf(Text, "Reboot after: %i second", i--);
+    nTxtUpdStatus.setText(Text);
+    delay(100);
+    esp_restart();
+  }
+  else if (type == NEX_EVENT_POP) {}
 }
 
 void cbButMixStartStop(NextionEventType type, INextionTouchable *widget) {
@@ -980,9 +1032,7 @@ void pidKSelect() {
   }
 }
 
-void Task1code( void * pvParameters ) {
-  DBG_SERIAL.print("Task1 running on core ");
-  DBG_SERIAL.println(xPortGetCoreID());
+void wifi_connect() {
   uint8_t WiFiConnTimeOut = 50;
   delay(1000);
   DBG_SERIAL.println("");
@@ -1021,11 +1071,10 @@ void Task1code( void * pvParameters ) {
       WiFi.enableAP(false);
     }
   }
-
   DBG_SERIAL.println();
+}
 
-  delay(1000);
-
+void spiffs_ftp_en() {
   if(SPIFFS.begin(true)) {
     DBG_SERIAL.println(F("SPIFFS opened!"));
     ftpSrv.begin(ftpUser, ftpPass); 
@@ -1036,6 +1085,156 @@ void Task1code( void * pvParameters ) {
     DBG_SERIAL.print(F("SPIFFS total bytes: ")); DBG_SERIAL.println(SPIFFS.totalBytes());
     DBG_SERIAL.print(F("SPIFFS used bytes: ")); DBG_SERIAL.println(SPIFFS.usedBytes());
   }
+}
+
+void Task1code( void * pvParameters ) {
+  DBG_SERIAL.print("Task1 running on core ");
+  DBG_SERIAL.println(xPortGetCoreID());
+
+  for(;;){
+    if(Flag.SecondTimer) {
+      Flag.SecondTimer = false;
+      
+      Temperature[Milk] = adcTemp.readADC_SingleEnded(Milk) * 0.003125;
+      Temperature[Shirt] = adcTemp.readADC_SingleEnded(Shirt) * 0.003125;   
+      //Temperature[Shirt] = 38.6;
+      PIDInput = Temperature[Milk];
+
+      /* Heating control ***********************************************************************************/ 
+      if(Flag.HeatingEn) {
+        switch (HeatingMode) {
+          case Past: {
+            pidKSelect();
+            m_PID.Compute();
+            HeatingPWM = (uint8_t)PIDOutput;
+            switch (PastState) {
+              case PastStateHeating : {
+                if(Temperature[Milk] >= (double)Param.SetPointValue[Past]) {
+                  PastDelayCnt = 30;
+                  PastState = PastStateDelay;
+                }
+              } break;
+              case PastStateDelay : {
+                if(PastDelayCnt == 0) {
+                  HeatingPWM = 0;
+                  Flag.HeatingEn = false;
+                }
+              } break;        
+              default: break;
+            }
+          } break;  
+
+          case Power:{
+            heating_ctrl(Param.SetPointValue[HeatingMode]);
+          } break;  
+
+          case Temp:{
+            pidKSelect();
+            m_PID.Compute();
+            HeatingPWM = (uint8_t)PIDOutput;
+            if(Temperature[Milk] >= Param.SetPointValue[Temp]) {
+              HeatingPWM = 0;
+              Flag.HeatingEn = false;
+            }
+          } break; 
+
+        default: break;
+        }
+      }
+      /* Heating control ***********************************************************************************/  
+    }
+    /* Display ********************************************************************************************/
+    if(Flag.HSecond) {
+      Flag.HSecond = false;
+      switch(NPage) {
+        case NexPHeat: {  // Heating display
+          nTxtMilkT.setText(addDeg(dtostrf(Temperature[Milk], 3, 1, Text)));
+          nTxtShirtT.setText(addDeg(dtostrf(Temperature[Shirt], 3, 1, Text))); 
+          if(Flag.HeatingEn) {
+            sprintf(Text, "%i%%%s", HeatingPWM, (HeatingMode == Power)?("   "):((consK)?("(c)"):("(a)")));
+            nTxtHeatPwr.setText(Text);
+            if(HeatingMode == Past) {
+              if(PastState == PastStateHeating) nTxtHeatState.setText("Heating");
+              if(PastState == PastStateDelay) {
+                nTxtHeatState.setText("Delay");
+                getTimeStrHMS(PastDelayCnt, Text);
+                nTxtHeatStateA.setText(Text);
+              }
+            }
+            if((HeatingMode == Power) || (HeatingMode == Temp)){
+              nTxtHeatState.setText("Heating");
+              nTxtHeatStateA.setText("---------");
+            }   
+          }
+          else {
+            if((PastState == PastStateDelay) || (HeatingMode == Power) || (HeatingMode == Temp)) {
+              nTxtHeatState.setText("---------");
+              nTxtHeatStateA.setText("---------");
+              nTxtHeatPwr.setText("-----");
+              nButHeatStart.setText("Start");
+              PastState = PastStateIdle;
+            }
+          } 
+        } break;
+        case NexPMix: { // Mixer display
+          if((Flag.MixProgEn) || (Flag.EndProg)) {      
+            sprintf(Text, "%i/%s", (CurrCycle + 1), ((prgCycle[CurrCycle].State == 1)?("W"):("P")));
+            nTxtCycleNum.setText(Text);
+            if(cycle_time(CurrCycle) < 60) sprintf(Text, "0:%02i", CurrCycleTime);
+            else sprintf(Text, "%i:%02i", (CurrCycleTime / 60), (CurrCycleTime % 60));
+            nTxtCycleTime.setText(Text);     
+            getTimeStrHMS(ProgTime, Text);
+            nTxtProgTime.setText(Text);
+            nSendMotorPwr(prgCycle[CurrCycle].Power);
+            if(OPower != prgCycle[CurrCycle].Power) {
+              nSliMotorPwr.setValue(prgCycle[CurrCycle].Power);
+              OPower = prgCycle[CurrCycle].Power;
+            }
+            if(Flag.EndProg) {
+              Flag.EndProg = false;
+              nButMixStart.setText("Start");
+              nTxtCycleNum.setText("--/-");
+              nTxtCycleTime.setText("--:--");
+              nSendProgTime();
+            }
+          }
+          else if(Flag.MixManualEn) {
+            nSendMotorPwr(MotorPower);
+            if(OPower != MotorPower) {
+              nSliMotorPwr.setValue(MotorPower);
+              OPower = MotorPower;
+            }
+          }
+        } break;
+        case NexPSett: {
+
+        } break;
+        default: break;
+      }
+    }
+    /* Display ********************************************************************************************/
+  }
+}
+
+void setup() {
+  // put your setup code here, to run once:
+  DBG_SERIAL.begin(DBG_BAUD);
+
+  NEX_SERIAL.begin(NEX_BAUD);
+  NEX_SERIAL.setRxBufferSize(100);
+
+  pinMode(2, OUTPUT);
+  pinMode(ENL_MOTOR_PIN, OUTPUT);
+  pinMode(ENR_MOTOR_PIN, OUTPUT);
+  pinMode(PWML_MOTOR_PIN, OUTPUT);
+  pinMode(PWMR_MOTOR_PIN, OUTPUT);
+  pinMode(PWM_RELAY_PIN, OUTPUT);
+
+  sblink(20, 20);
+
+  wifi_connect();
+  delay(1000);
+  spiffs_ftp_en();
 
   prgCount = readProgList(F("ProgList.txt"));
   DBG_SERIAL.print(F("Read "));
@@ -1054,7 +1253,7 @@ void Task1code( void * pvParameters ) {
   server.on(F("/xml"), h_XML);
   server.begin();
 
-  /* Nextion HEATING page callbacks */
+  // Nextion HEATING page callbacks
   nTxtPMixH.attachCallback(&cbPMixShow);
   nTxtPSettH.attachCallback(&cbPSettShow);
   nRButPast.attachCallback(&cbNexRButPast);
@@ -1064,7 +1263,7 @@ void Task1code( void * pvParameters ) {
   nButHeatDown.attachCallback(&cbNexButHeatDown);
   nButHeatStart.attachCallback(&cbHeatStart);
 
-  /* Nextion MIX page callbacks */
+  // Nextion MIX page callbacks
   nTxtPHeatM.attachCallback(&cbPHeatShow);
   nTxtPSettM.attachCallback(&cbPSettShow);
   nButCCRot.attachCallback(&cbButCCRot);
@@ -1076,46 +1275,22 @@ void Task1code( void * pvParameters ) {
   nSliMotorPwr.attachCallback(&cbSliMotorPwr);
   nButMixStart.attachCallback(&cbButMixStartStop);
 
-  /* Nextion SETT page callbacks */
+  // Nextion SETT page callbacks
   nTxtPHeatS.attachCallback(&cbPHeatShow);
   nTxtPMixS.attachCallback(&cbPMixShow);
   nTxtPSettS.attachCallback(&cbPSettShow);
+  nButFWUpd.attachCallback(&cbButFWUpd);
+  nButReset.attachCallback(&cbButReset);
 
   nTxtHMode.setText("P");
   showPastPageData();
 
-  for(;;){
-    /* Обработка запросов HTML клиента */
-    server.handleClient();
-    /* Обработка запросов FTP клиента */
-    ftpSrv.handleFTP();
-    /* Обработка сообщений Nextion дисплея */
-    nex.poll();
-    delay(50);
-  }
-}
-
-void setup() {
-  // put your setup code here, to run once:
-  DBG_SERIAL.begin(DBG_BAUD);
-
-  NEX_SERIAL.begin(NEX_BAUD);
-  NEX_SERIAL.setRxBufferSize(100);
   nex.init();
   
   Wire.begin(SDA, SCL, 400000);
   i2c_scan();
   adcTemp.begin();
   adcTemp.setGain(GAIN_FOUR);
-
-  pinMode(2, OUTPUT);
-  pinMode(ENL_MOTOR_PIN, OUTPUT);
-  pinMode(ENR_MOTOR_PIN, OUTPUT);
-  pinMode(PWML_MOTOR_PIN, OUTPUT);
-  pinMode(PWMR_MOTOR_PIN, OUTPUT);
-  pinMode(PWM_RELAY_PIN, OUTPUT);
-
-  sblink(20, 20);
 
   //eeprom_init();
   //save_param();
@@ -1149,135 +1324,22 @@ void setup() {
   // Создаем задачу с кодом из функции Task1code(),
   // с приоритетом 1 и выполняемую на ядре 0:
   xTaskCreatePinnedToCore(
-                    Task1code,   /* Функция задачи */
-                    "Task1",     /* Название задачи */
-                    50000,       /* Размер стека задачи */
-                    NULL,        /* Параметр задачи */
-                    1,           /* Приоритет задачи */
-                    &Task1,      /* Идентификатор задачи, чтобы ее можно было отслеживать */
-                    0);          /* Ядро для выполнения задачи (0) */                  
+                    Task1code,   // Функция задачи
+                    "Task1",     // Название задачи
+                    50000,       // Размер стека задачи
+                    NULL,        // Параметр задачи
+                    1,           // Приоритет задачи
+                    &Task1,      // Идентификатор задачи, чтобы ее можно было отслеживать
+                    0);          // Ядро для выполнения задачи (0)                  
   delay(500);
 }
 
 void loop() {
-  if(Flag.SecondTimer) {
-    Flag.SecondTimer = false;
-    
-    Temperature[Milk] = adcTemp.readADC_SingleEnded(Milk) * 0.003125;
-    Temperature[Shirt] = adcTemp.readADC_SingleEnded(Shirt) * 0.003125;   
-    PIDInput = Temperature[Milk];
-
-    /* Heating control ***********************************************************************************/ 
-    if(Flag.HeatingEn) {
-      switch (HeatingMode) {
-        case Past: {
-          pidKSelect();
-          m_PID.Compute();
-          HeatingPWM = (uint8_t)PIDOutput;
-          switch (PastState) {
-            case PastStateHeating : {
-              if(Temperature[Milk] >= (double)Param.SetPointValue[Past]) {
-                PastDelayCnt = 30;
-                PastState = PastStateDelay;
-              }
-            } break;
-            case PastStateDelay : {
-              if(PastDelayCnt == 0) {
-                HeatingPWM = 0;
-                Flag.HeatingEn = false;
-              }
-            } break;        
-            default: break;
-          }
-        } break;  
-
-        case Power:{
-          heating_ctrl(Param.SetPointValue[HeatingMode]);
-        } break;  
-
-        case Temp:{
-          pidKSelect();
-          m_PID.Compute();
-          HeatingPWM = (uint8_t)PIDOutput;
-          if(Temperature[Milk] >= Param.SetPointValue[Temp]) {
-            HeatingPWM = 0;
-            Flag.HeatingEn = false;
-          }
-        } break; 
-
-      default: break;
-      }
-    }
-    /* Heating control ***********************************************************************************/  
-  }
-  /* Display ********************************************************************************************/
-  if(Flag.HSecond) {
-    Flag.HSecond = false;
-    switch(NPage) {
-      case NexPHeat: {  // Heating display
-        nTxtMilkT.setText(addDeg(dtostrf(Temperature[Milk], 3, 1, Text)));
-        nTxtShirtT.setText(addDeg(dtostrf(Temperature[Shirt], 3, 1, Text))); 
-        if(Flag.HeatingEn) {
-          sprintf(Text, "%i%%%s", HeatingPWM, (HeatingMode == Power)?("   "):((consK)?("(c)"):("(a)")));
-          nTxtHeatPwr.setText(Text);
-          if(HeatingMode == Past) {
-            if(PastState == PastStateHeating) nTxtHeatState.setText("Heating");
-            if(PastState == PastStateDelay) {
-              nTxtHeatState.setText("Delay");
-              getTimeStrHMS(PastDelayCnt, Text);
-              nTxtHeatStateA.setText(Text);
-            }
-          }
-          if((HeatingMode == Power) || (HeatingMode == Temp)){
-            nTxtHeatState.setText("Heating");
-            nTxtHeatStateA.setText("---------");
-          }   
-        }
-        else {
-          if((PastState == PastStateDelay) || (HeatingMode == Power) || (HeatingMode == Temp)) {
-            nTxtHeatState.setText("---------");
-            nTxtHeatStateA.setText("---------");
-            nTxtHeatPwr.setText("-----");
-            nButHeatStart.setText("Start");
-            PastState = PastStateIdle;
-          }
-        } 
-      } break;
-      case NexPMix: { // Mixer display
-        if((Flag.MixProgEn) || (Flag.EndProg)) {      
-          sprintf(Text, "%i/%s", (CurrCycle + 1), ((prgCycle[CurrCycle].State == 1)?("W"):("P")));
-          nTxtCycleNum.setText(Text);
-          if(cycle_time(CurrCycle) < 60) sprintf(Text, "0:%02i", CurrCycleTime);
-          else sprintf(Text, "%i:%02i", (CurrCycleTime / 60), (CurrCycleTime % 60));
-          nTxtCycleTime.setText(Text);     
-          getTimeStrHMS(ProgTime, Text);
-          nTxtProgTime.setText(Text);
-          nSendMotorPwr(prgCycle[CurrCycle].Power);
-          if(OPower != prgCycle[CurrCycle].Power) {
-            nSliMotorPwr.setValue(prgCycle[CurrCycle].Power);
-            OPower = prgCycle[CurrCycle].Power;
-          }
-          if(Flag.EndProg) {
-            Flag.EndProg = false;
-            nButMixStart.setText("Start");
-            nTxtCycleNum.setText("--/-");
-            nTxtCycleTime.setText("--:--");
-            nSendProgTime();
-          }
-        }
-        else if(Flag.MixManualEn) {
-          nSendMotorPwr(MotorPower);
-          if(OPower != MotorPower) {
-            nSliMotorPwr.setValue(MotorPower);
-            OPower = MotorPower;
-          }
-        }
-      } break;
-      case NexPSett: {
-
-      } break;
-      default: break;
-    }
-  }
-  /* Display ********************************************************************************************/
+  // Обработка запросов HTML клиента
+  server.handleClient();
+  // Обработка запросов FTP клиента
+  ftpSrv.handleFTP();
+  // Обработка сообщений Nextion дисплея
+  nex.poll();
+  delay(50);
 }

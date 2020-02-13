@@ -13,6 +13,9 @@
 			<tr>
 				<td colspan="2">
 					<button value ='rt_rst' type='submit' onclick="push_butt(this.value)">Reset running time</button>
+					<br>
+					<hr>
+					<button value ='updFWBut' type='submit' onclick="push_butt(this.value)">Update FW</button>
 					<hr>
 				</td>
 			</tr>
@@ -29,13 +32,6 @@
 					<hr>
 				</td>				
 			</tr>	
-			<tr>
-				<td colspan="2"><a href='/update'><button id='butFWUpdate'>FW / FS Update</button></a></td>
-				<form enctype="multipart/form-data" method="post">
-					<p><input type="file" name="f">
-					<input type="submit" value="Обновить FW"></p>
-				</form> 
-			</tr>
 		</table>
 			
 		<script>
