@@ -95,7 +95,7 @@ NextionVariableString nVarTime(nex, NexPHeat, 23, "vTimeStr");
 NextionText nTxtTimePHeat(nex, NexPHeat, 16, "tTime");
 NextionText nTxtHeatState(nex, NexPHeat, 1, "tHeatState");
 NextionText nTxtHeatStateA(nex, NexPHeat, 23, "tHeatStateA");
-//NextionText nTxtPState(nex, NexPHeat, 1, "tPState");
+NextionText nTxtDelay(nex, NexPHeat, 22, "tDelay");
 NextionText nTxtMilkT(nex, NexPHeat, 2, "tMilk_t");
 NextionText nTxtShirtT(nex, NexPHeat, 3, "tShirt_t");
 NextionText nTxtHMode(nex, NexPHeat, 13, "tHMode");
@@ -199,7 +199,7 @@ struct PIDData {
 } PIDData;
 
 bool consK = false;
-uint16_t PastDelayCnt;
+uint16_t PastDelayCnt = 0, nPastDelayCnt = 0;
 
 enum HeatModeEnum {
   Past,
@@ -1393,6 +1393,9 @@ void cbHeatStart(NextionEventType type, INextionTouchable *widget) {
         case Past: {
           DBG_SERIAL.println(F("Heating mode - PAST"));
           olog(F("Heating mode - PAST"));
+          nTxtDelay.getText(Text, 3);
+          olog(String("Past delay: ") + String(Text).toInt() + " min");
+          nPastDelayCnt = String(Text).toInt() * 60;
           flog(TEMP_LOG_FN, "Heating mode - PAST", true);
           flog(TEMP_LOG_FN, String("PID coefficients: p-") + String(PIDData.kP[Agg], 4)
                                                   + ", i-" + String(PIDData.kI[Agg], 4)
@@ -1726,13 +1729,12 @@ void loop() {
     if(Flag.HeatingEn) {
       flog(TEMP_LOG_FN, Temperature[Shirt] + String(";") + Temperature[Milk] + ";" + HeatingPWM);
       switch (HeatingMode) {
-        case Past: {
-          // pidKSelect();            
+        case Past: {   
           HeatingPWM = pid(Param.SetPointValue[HeatingMode], Temperature[Milk], PIDData.kP[Agg], PIDData.kI[Agg], PIDData.kD[Agg]);
           switch (PastState) {
             case PastStateHeating : {
               if(Temperature[Milk] >= (double)Param.SetPointValue[Past]) {
-                PastDelayCnt = 300;
+                PastDelayCnt = nPastDelayCnt;
                 PastState = PastStateDelay;
               }
             } break;
