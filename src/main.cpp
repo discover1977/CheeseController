@@ -63,6 +63,11 @@ Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire);
 
 TaskHandle_t WiFiCoreTaskHandle;
 
+TimerHandle_t SecondTimerHandle;
+void SecondTimer();
+TimerHandle_t HSecondTimerHandle;
+void HSecondTimer();
+
 void WiFiCodeTask(void* param);
 void OLEDMsgCodeTask(void* param);
 
@@ -436,7 +441,6 @@ void olog(String str) {
 
 hw_timer_t *relayTimer = NULL;
 void IRAM_ATTR onRelayTimer() {
-  static uint8_t hsCnt = 0;
   static uint8_t pwmCnt = 0;
   if(pwmCnt < HeatingPWM) {
     digitalWrite(PWM_SSR_PIN, HIGH);
@@ -454,12 +458,6 @@ void IRAM_ATTR onRelayTimer() {
       OLogClsCnt++;
       OLogClsTimer = OLOG_CLS_DELAY;
     }
-  }
-
-  if(++hsCnt == 50) {
-    hsCnt = 0;
-    Flag.HSecond = true;
-    Flag.tcUpd = true;
   }
 }
 
@@ -558,13 +556,19 @@ uint32_t prog_time(uint8_t prgNum) {
   return ret;
 }
 
-hw_timer_t *secondTimer = NULL;
-void IRAM_ATTR onSecondTimer() {
+void HSecondTimer() {
+  //DBG_SERIAL.println("Half Second timer");
+  Flag.HSecond = true;
+}
+
+void SecondTimer() {
   static uint8_t lCycleCount = 0;
   static uint16_t lCycleTime = 0, lPTime = 0, lRTime = 0, lDirection = FORWARD, lState = MixerWork;
-  static uint16_t wifiOffDelay = 30;
+
+  //DBG_SERIAL.println("Second timer");
 
   Flag.SecondTimer = true;
+  Flag.tcUpd = true;
 
   if(PastDelayCnt > 0) {
     PastDelayCnt--;
@@ -1669,10 +1673,10 @@ void setup() {
   timerAlarmWrite(relayTimer, 10000, true);
   timerAlarmEnable(relayTimer);
 
-  secondTimer = timerBegin(3, 80, true);
-  timerAttachInterrupt(secondTimer, &onSecondTimer, true);
-  timerAlarmWrite(secondTimer, 1000000, true);
-  timerAlarmEnable(secondTimer);
+  SecondTimerHandle = xTimerCreate("Second timer", pdMS_TO_TICKS(1000), pdTRUE, (void *)0, reinterpret_cast<TimerCallbackFunction_t>(SecondTimer));
+  HSecondTimerHandle = xTimerCreate("Half Second timer", pdMS_TO_TICKS(500), pdTRUE, (void *)0, reinterpret_cast<TimerCallbackFunction_t>(HSecondTimer));
+  xTimerStart(SecondTimerHandle, 0);
+  xTimerStart(HSecondTimerHandle, 0);
 
   addDeg(degSymbol);
   HeatingMode = Past;
@@ -1854,4 +1858,5 @@ void loop() {
     Flag.OLogCls = false;
     olog(F("                      "));
   }
+  vTaskDelay(pdMS_TO_TICKS(10));
 }
