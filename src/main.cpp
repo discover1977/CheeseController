@@ -61,8 +61,11 @@ Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire);
 
 #define OLOG_CLS_DELAY  10
 
-TaskHandle_t WiFiCoreHandle;
+TaskHandle_t WiFiCoreTaskHandle;
+
 void WiFiCodeTask(void* param);
+void OLEDMsgCodeTask(void* param);
+
 const String TEMP_LOG_FN = "/temp_log.csv";
 
 enum NexPage {
@@ -74,7 +77,7 @@ enum NexPage {
 
 #define TIME_OFFSET (3600 * 3)
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", TIME_OFFSET, 600000);
+NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", TIME_OFFSET, 60000);
 Adafruit_ADS1115  adcTemp;
 
 Nextion nex(NEX_SERIAL);
@@ -236,6 +239,7 @@ struct Flag {
   bool HeatingEn;
   bool HSecond;
   bool OLogCls;
+  bool tcUpd;
 } Flag;
 
 float constrainF(float val, float min, float max) {
@@ -455,6 +459,7 @@ void IRAM_ATTR onRelayTimer() {
   if(++hsCnt == 50) {
     hsCnt = 0;
     Flag.HSecond = true;
+    Flag.tcUpd = true;
   }
 }
 
@@ -662,7 +667,6 @@ String build_XML() {
   xmlStr +=        get_rt();   // for example
   xmlStr +=      F("</x_rt>");
   xmlStr +=     F("</xml>");
-  // Serial.println(XML);
   return xmlStr;
 }
 
@@ -828,7 +832,6 @@ void gui_update() {
           delay(5000);
           esp_restart();
         }
-
         // end: wait(delay) for the nextion to finish the update process, send nextion reset command and end the serial connection to the nextion
         nextion.end();
     }
@@ -897,7 +900,6 @@ void ap_config() {
 }
 
 uint8_t readProg(uint8_t progNumber, ProgCycle *pc) {
-  //DBG_SERIAL.print(F("Read prog: ")); DBG_SERIAL.println(prgList[progNumber]);
   String fn = F("/");
   if(prgList[progNumber].indexOf("\r") != MixManual) {
     prgList[progNumber].setCharAt((prgList[progNumber].length() - 1), ' ');
@@ -915,7 +917,6 @@ uint8_t readProg(uint8_t progNumber, ProgCycle *pc) {
     } else {
       while(pf.available()) {
         String line = pf.readStringUntil('\n');
-        //DBG_SERIAL.print(F("Cycle string: ")); Serial.println(line);
         pc[cycleNumber].State = (line.substring(0, 1) == "W")?(1):(0);
         si = 2;
         ei = line.indexOf(";", si);
@@ -952,7 +953,6 @@ void parsePID_line(String str, uint8_t set) {
   si = ei + 1;
   ei = str.length() - 1;
   PIDData.kD[set] = str.substring(si, ei).toDouble();
-  //olog(String("p") + PIDData.kP[set] + "i" + PIDData.kI[set] + "d" + PIDData.kD[set]);
 }
 
 void readPID(String file) {
@@ -960,7 +960,7 @@ void readPID(String file) {
   uint8_t i = 0;
   if (!f) {
     DBG_SERIAL.println(F("PID file open failed."));
-    olog(F("PID file open failed."));
+    //olog(F("PID file open failed."));
   } else {
     while(f.available()) {
       String line = f.readStringUntil('\n');
@@ -1036,12 +1036,9 @@ void nSendButMixStartStopTxt(String str) {
 }
 
 void nSendIPAddress() {
-  //sprintf(Text, "%s", myIP.toString());
   String str = "http://" + myIP.toString() + "/index.html";
   str.toCharArray(Text, str.length() + 1);
   nTxtStatus.setText(Text);
-  //nSTxtAddr.setText(Text);
-  //nQrAddr.setText(Text);
 }
 
 void cbButFWUpd(NextionEventType type, INextionTouchable *widget) {
@@ -1498,17 +1495,6 @@ void i2c_scan() {
   }
 }
 
-/*void pidKSelect() {  
-  //double gap = abs(mPID.setpoint - mPID.output); //distance away from setpoint
-  if (gap < 10.0) {  //we're close to setpoint, use conservative tuning parameters  
-    consK = true;
-  }
-  else {
-    //we're far from setpoint, use aggressive tuning parameters
-
-  }
-}*/
-
 void wifi_connect() {
   uint8_t WiFiConnTimeOut = 50;
   delay(1000);
@@ -1559,10 +1545,28 @@ void wifi_connect() {
   DBG_SERIAL.println();
 }
 
-void spiffs_ftp_en() {
+String curTime = "";
+
+void spiffs_en() {
   if(SPIFFS.begin(true)) {
     DBG_SERIAL.println(F("SPIFFS opened!"));
-    olog(F("SPIFFS opened!"));
+    //olog(F("SPIFFS opened!"));
+    DBG_SERIAL.print(F("SPIFFS total bytes: ")); DBG_SERIAL.println(SPIFFS.totalBytes());
+    DBG_SERIAL.print(F("SPIFFS used bytes: ")); DBG_SERIAL.println(SPIFFS.usedBytes());
+    //olog(String("FTP used: ") + SPIFFS.usedBytes());
+  }
+}
+
+void WiFiCodeTask(void* param) {
+    wifi_connect();
+    // Регистрация обработчиков
+    server.on(F("/"), h_Website);    
+    server.on(F("/wifi_param"), h_wifi_param); 
+    server.on(F("/pushButt"), h_pushButt);    
+    server.onNotFound(handleWebRequests);       
+    server.on(F("/xml"), h_XML);
+    server.begin();
+
     ftpSrv.begin(ftpUser, ftpPass); 
     DBG_SERIAL.println(F("FTP server started!"));
     olog(F("FTP server started!"));
@@ -1571,10 +1575,18 @@ void spiffs_ftp_en() {
     DBG_SERIAL.print(F("pass: ")); DBG_SERIAL.println(ftpPass);
     olog(String("pass: ") + ftpPass);
 
-    DBG_SERIAL.print(F("SPIFFS total bytes: ")); DBG_SERIAL.println(SPIFFS.totalBytes());
-    DBG_SERIAL.print(F("SPIFFS used bytes: ")); DBG_SERIAL.println(SPIFFS.usedBytes());
-    olog(String("FTP used: ") + SPIFFS.usedBytes());
-  }
+    for (;;) {
+      // Обработка запросов HTML клиента
+      server.handleClient();
+      // Обработка запросов FTP клиента
+      ftpSrv.handleFTP();
+      if(Flag.tcUpd) {
+        Flag.tcUpd = false;
+        // Запрос времени
+        timeClient.update();
+        curTime = timeClient.getFormattedTime();
+      }
+    }
 }
 
 void setup() {
@@ -1587,7 +1599,6 @@ void setup() {
   NEX_SERIAL.setRxBufferSize(100);
 
   Wire.begin(SDA, SCL, 400000);
-  //i2c_scan();
 
   if(!oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3C for 128x32
     DBG_SERIAL.println(F("SSD1306 allocation failed"));
@@ -1667,16 +1678,22 @@ void setup() {
   HeatingMode = Past;
 
   sblink(20, 20);
-  wifi_connect();
-  delay(500);
 
-  spiffs_ftp_en();
+  xTaskCreatePinnedToCore(
+              WiFiCodeTask,   /* Функция, содержащая код задачи */
+              "Wi-Fi",        /* Название задачи */
+              10000,          /* Размер стека в словах */
+              NULL,           /* Параметр создаваемой задачи */
+              0,              /* Приоритет задачи */
+              &WiFiCoreTaskHandle,         /* Идентификатор задачи */
+              0);             /* Ядро, на котором будет выполняться задача */
+
+  spiffs_en();
 
   prgCount = readProgList(F("/ProgList.txt"));
   DBG_SERIAL.print(F("Read "));  
   DBG_SERIAL.print(prgCount);
   DBG_SERIAL.println(F(" prog"));
-  olog(String("Read ") + prgCount + " prog");
 
   for(uint i = 0; i < prgCount; i++) {
     DBG_SERIAL.print(i + 1); DBG_SERIAL.print(F(" - ")); DBG_SERIAL.println(prgList[i]); 
@@ -1685,26 +1702,14 @@ void setup() {
   //olog(F("Read PID coeff"));
   readPID("/pid.txt");
 
-  // Регистрация обработчиков
-  server.on(F("/"), h_Website);    
-  server.on(F("/wifi_param"), h_wifi_param); 
-  server.on(F("/pushButt"), h_pushButt);    
-  server.onNotFound(handleWebRequests);       
-  server.on(F("/xml"), h_XML);
-  server.begin();
-
   // Init Nextion display
   nex.init();
-  olog(F("Init Nextion display"));
+  //olog(F("Init Nextion display"));
   nTxtHMode.setText((char*)"P");
   showPastPageData();
 }
 
 void loop() {
-  // Обработка запросов HTML клиента
-  server.handleClient();
-  // Обработка запросов FTP клиента
-  ftpSrv.handleFTP();
   // Обработка сообщений Nextion дисплея
   nex.poll();
   if(Flag.SecondTimer) {
@@ -1758,12 +1763,10 @@ void loop() {
 
   /* Display ********************************************************************************************/
   if(Flag.HSecond) {    
-    // Запрос времени
-    timeClient.update();  
     Flag.HSecond = false;
     switch(NPage) {
       case NexPHeat: {  // Heating display
-          timeClient.getFormattedTime().toCharArray(Text, 9);
+          sprintf(Text, "%s", curTime);
           nTxtTimePHeat.setText(Text);
         nTxtMilkT.setText(addDeg(dtostrf(Temperature[Milk], 3, 1, Text)));
         nTxtShirtT.setText(addDeg(dtostrf(Temperature[Shirt], 3, 1, Text))); 
@@ -1784,7 +1787,6 @@ void loop() {
           }   
         }
         else {
-          //if((PastState == PastStateDelay) || (HeatingMode == Power) || (HeatingMode == Temp)) {
           if(PastState != PastStateIdle) {
             nTxtHeatState.setText((char*)"---------");
             nTxtHeatStateA.setText((char*)"---------");
@@ -1795,7 +1797,7 @@ void loop() {
         } 
       } break;
       case NexPMix: { // Mixer display
-          timeClient.getFormattedTime().toCharArray(Text, 9);
+          sprintf(Text, "%s", curTime);
           nTxtTimePMix.setText(Text);
         if((Flag.MixProgEn) || (Flag.EndProg)) {      
           sprintf(Text, "%i/%s", (CurrCycle + 1), ((prgCycle[CurrCycle].State == 1)?("W"):("P")));
@@ -1827,7 +1829,7 @@ void loop() {
         }
       } break;
       case NexPSett: {
-          timeClient.getFormattedTime().toCharArray(Text, 9);
+          sprintf(Text, "%s", curTime);
           nTxtTimePSett.setText(Text);
         for(int i = 0 ;i < 4; i++) {
           if(OutStatePr[i] != OutState[i]) {
