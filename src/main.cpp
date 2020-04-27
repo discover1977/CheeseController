@@ -26,6 +26,9 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
+//#include <PZEM004T.h>
+//#include <PZEM004Tv30.h>
+
 #define SCREEN_WIDTH    128 // OLED display width, in pixels
 #define SCREEN_HEIGHT   32 // OLED display height, in pixels
 #define OLED_RESET      15 // Reset pin # (or -1 if sharing Arduino reset pin)
@@ -52,6 +55,7 @@ Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire);
 #define PWML_MOTOR_PIN 27
 #define PWMR_MOTOR_PIN 14
 #define EN_MOTOR_PIN 12
+
 #define PWM_SSR_PIN 13
 
 #define PWM_FREQ  20000
@@ -1467,39 +1471,6 @@ void cbPSettShow(NextionEventType type, INextionTouchable *widget) {
     nSendIPAddress();
   }
   else if (type == NEX_EVENT_POP) {}
-}
-
-void i2c_scan() {
-  byte error, address;
-  int nDevices;
-  DBG_SERIAL.println("");
-  DBG_SERIAL.println(F("Scanning..."));
-  nDevices = 0;
-  for(address = 1; address < 127; address++ ) {
-    Wire.beginTransmission(address);
-    error = Wire.endTransmission();
-    if (error == 0) {
-      DBG_SERIAL.print(F("I2C device found at address 0x"));
-      if (address<16) {
-        Serial.print(F("0"));
-      }
-      DBG_SERIAL.println(address,HEX);
-      nDevices++;
-    }
-    else if (error==4) {
-      DBG_SERIAL.print(F("Unknow error at address 0x"));
-      if (address<16) {
-        DBG_SERIAL.print(F("0"));
-      }
-      DBG_SERIAL.println(address,HEX);
-    }    
-  }
-  if (nDevices == 0) {
-    DBG_SERIAL.println(F("No I2C devices found\n"));
-  }
-  else {
-    DBG_SERIAL.println(F("done\n"));
-  }
 }
 
 void wifi_connect() {
