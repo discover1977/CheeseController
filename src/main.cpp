@@ -22,12 +22,10 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <ESPNexUpload.h>
-
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
-//#include <PZEM004T.h>
-//#include <PZEM004Tv30.h>
+const String version = "1.0";
 
 #define SCREEN_WIDTH    128 // OLED display width, in pixels
 #define SCREEN_HEIGHT   32 // OLED display height, in pixels
@@ -227,10 +225,10 @@ char percentSymbol[2] = {'%', 0x00};
 /* WEB & FTP server variables */
 WebServer server;
 FtpServer ftpSrv;
-const char* ftpUser = "esp32";
-const char* ftpPass = "esp32";
-const char* ap_ssid = "esp32_dev";
-const char* ap_pass = "esp32_dev";
+const char* ftpUser = "ChFCFTP";
+const char* ftpPass = "ChFCFTP";
+const char* ap_ssid = "ChFC";
+const char* ap_pass = "controller";
 
 struct RunningTime {
   uint8_t second = 0; 
@@ -1685,6 +1683,8 @@ void setup() {
   //olog(F("Init Nextion display"));
   nTxtHMode.setText((char*)"P");
   showPastPageData();
+  delay(1000);
+  olog(String("FW ver: ") + version);
 }
 
 void loop() {
