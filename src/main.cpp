@@ -25,17 +25,31 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
-const String version = "1.0";
+const String version = "1.1";
+
+//#define PICO
 
 #define SCREEN_WIDTH    128 // OLED display width, in pixels
 #define SCREEN_HEIGHT   32 // OLED display height, in pixels
 #define OLED_RESET      15 // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire);
 
-#define DBG_SERIAL  Serial
-#define DBG_BAUD    921600
-#define NEX_SERIAL  Serial2
-#define NEX_BAUD    921600
+#ifdef PICO
+  #include <SoftwareSerial.h>
+#define SW_RxD  23
+#define SW_TxD  18
+SoftwareSerial swSerial(SW_RxD, SW_TxD);
+#define DBG_SERIAL swSerial
+#define DBG_BAUD 115200
+#define NEX_SERIAL Serial
+#define NEX_BAUD 921600
+#else
+  #define DBG_SERIAL  Serial
+  #define DBG_BAUD    921600
+  #define NEX_SERIAL  Serial2
+  #define NEX_BAUD    921600
+#endif
+
 
 #define PARAM_ADDR  (0)
 #define PRG_NUM   10
@@ -175,7 +189,7 @@ String prgList[PRG_NUM];
 uint8_t prgCount = 0;
 uint8_t cyclesCount = 0;
 uint8_t MotorPower = 25;
-char Text[51];
+char Text[101];
 uint8_t CurrCycle = 0;
 uint16_t CurrCycleTime = 0;
 uint32_t ProgTime = 0;
@@ -373,7 +387,7 @@ bool remove_flog(String path) {
 bool flog(String path, String logStr, bool newFile = false) {  
   File f = SPIFFS.open(path, (newFile)?(FILE_WRITE):(FILE_APPEND));
   if (!f) {
-    Serial.println(F("File open failed."));
+    DBG_SERIAL.println(F("File open failed."));
     return false;
     led_ctrl(LOW);
   } 
@@ -522,12 +536,12 @@ void motor_ctrl(uint8_t enable, uint8_t direct, uint8_t power) {
     if(direct == FORWARD) {
       ledcWrite(PWML_TIMER_CHANN, map(power, 0, 100, 0, 255));
       ledcWrite(PWMR_TIMER_CHANN, 0);
-      DBG_SERIAL.print(F("Motor ON, CW, power: ")); Serial.print(power); Serial.println(F("%"));
+      DBG_SERIAL.print(F("Motor ON, CW, power: ")); DBG_SERIAL.print(power); DBG_SERIAL.println(F("%"));
     }
     else {
       ledcWrite(PWML_TIMER_CHANN, 0);
       ledcWrite(PWMR_TIMER_CHANN, map(power, 0, 100, 0, 255));
-      DBG_SERIAL.print(F("Motor ON, CCW, power: ")); Serial.print(power); Serial.println(F("%"));
+      DBG_SERIAL.print(F("Motor ON, CCW, power: ")); DBG_SERIAL.print(power); DBG_SERIAL.println(F("%"));
     }
 	}
 	else {
@@ -1459,13 +1473,14 @@ void cbPHeatShow(NextionEventType type, INextionTouchable *widget) {
 
 void cbPSettShow(NextionEventType type, INextionTouchable *widget) {
   NEX_SERIAL.flush();
-  nButOut1.setForegroundColour((OutState[0])?(NEX_COL_RED):(NEX_COL_BLACK));
-  nButOut2.setForegroundColour((OutState[1])?(NEX_COL_RED):(NEX_COL_BLACK));
-  nButOut3.setForegroundColour((OutState[2])?(NEX_COL_RED):(NEX_COL_BLACK));
-  nButOut4.setForegroundColour((OutState[3])?(NEX_COL_RED):(NEX_COL_BLACK));
   if (type == NEX_EVENT_PUSH) {
+    nButOut1.setForegroundColour((OutState[0])?(NEX_COL_RED):(NEX_COL_BLACK), false);
+    nButOut2.setForegroundColour((OutState[1])?(NEX_COL_RED):(NEX_COL_BLACK), false);
+    nButOut3.setForegroundColour((OutState[2])?(NEX_COL_RED):(NEX_COL_BLACK), false);
+    nButOut4.setForegroundColour((OutState[3])?(NEX_COL_RED):(NEX_COL_BLACK), false);
+    nex.refresh();
     NPage = NexPSett;
-    nex.drawLine(20, 293, 320, 293, NEX_COL_GRAY);
+    //nex.drawLine(20, 293, 320, 293, NEX_COL_GRAY);
     nSendIPAddress();
   }
   else if (type == NEX_EVENT_POP) {}
@@ -1568,8 +1583,8 @@ void WiFiCodeTask(void* param) {
 void setup() {
   // put your setup code here, to run once:
   DBG_SERIAL.begin(DBG_BAUD);
-  Serial.println("");
-  Serial.println(String("SDK:") + String(ESP.getSdkVersion()));
+  DBG_SERIAL.println("");
+  DBG_SERIAL.println(String("SDK:") + String(ESP.getSdkVersion()));
 
   NEX_SERIAL.begin(NEX_BAUD);
   NEX_SERIAL.setRxBufferSize(100);
@@ -1683,7 +1698,7 @@ void setup() {
   //olog(F("Init Nextion display"));
   nTxtHMode.setText((char*)"P");
   showPastPageData();
-  delay(1000);
+  delay(5000);
   olog(String("FW ver: ") + version);
 }
 
@@ -1812,14 +1827,15 @@ void loop() {
           if(OutStatePr[i] != OutState[i]) {
             OutStatePr[i] = OutState[i];
             switch (i) {
-              case 0: { nButOut1.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
-              case 1: { nButOut2.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
-              case 2: { nButOut3.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
-              case 3: { nButOut4.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
+              case 0: { nButOut1.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK), false);} break;
+              case 1: { nButOut2.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK), false);} break;
+              case 2: { nButOut3.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK), false);} break;
+              case 3: { nButOut4.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK), false);} break;
               default: break;
             }
           }
         }
+        nex.refresh();
       } break;
       default: break;
     }
