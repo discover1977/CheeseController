@@ -1827,15 +1827,14 @@ void loop() {
           if(OutStatePr[i] != OutState[i]) {
             OutStatePr[i] = OutState[i];
             switch (i) {
-              case 0: { nButOut1.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK), false);} break;
-              case 1: { nButOut2.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK), false);} break;
-              case 2: { nButOut3.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK), false);} break;
-              case 3: { nButOut4.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK), false);} break;
+              case 0: { nButOut1.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
+              case 1: { nButOut2.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
+              case 2: { nButOut3.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
+              case 3: { nButOut4.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
               default: break;
             }
           }
-        }
-        nex.refresh();
+        }        
       } break;
       default: break;
     }
