@@ -16,6 +16,7 @@
 #include <NextionSlidingText.h>
 #include <NextionSlider.h>
 #include <NextionCrop.h>
+#include <NextionPicture.h>
 #include <NextionVariableString.h>
 #include <Adafruit_ADS1015.h>
 #include <Wire.h>
@@ -25,9 +26,9 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
-const String version = "1.1";
+const String version = "1.2";
 
-//#define PICO
+#define PICO
 
 #define SCREEN_WIDTH    128 // OLED display width, in pixels
 #define SCREEN_HEIGHT   32 // OLED display height, in pixels
@@ -50,7 +51,7 @@ SoftwareSerial swSerial(SW_RxD, SW_TxD);
   #define NEX_BAUD    921600
 #endif
 
-
+#define FLOG_INTERVAL 10
 #define PARAM_ADDR  (0)
 #define PRG_NUM   10
 
@@ -160,6 +161,10 @@ NextionButton nButOut4(nex, NexPSett, 15, "bOut4");
 NextionButton nButFWUpd(nex, NexPSett, 8, "bFWUpd");
 NextionButton nButGUIUpd(nex, NexPSett, 9, "bGUIUpd");
 NextionButton nButReset(nex, NexPSett, 11, "bRst");
+NextionPicture nPicOut1(nex, NexPSett, 17, "pOut1");
+NextionPicture nPicOut2(nex, NexPSett, 18, "pOut2");
+NextionPicture nPicOut3(nex, NexPSett, 19, "pOut3");
+NextionPicture nPicOut4(nex, NexPSett, 20, "pOut4");
 
 int8_t NPage = NexPHeat;
 
@@ -198,6 +203,8 @@ uint8_t Direction = FORWARD;
 int8_t OPower = -1;
 uint16_t OLogClsTimer = OLOG_CLS_DELAY;
 uint8_t OLogClsCnt = 0;
+bool OutState[4];
+bool OutStatePr[4];
 
 /* Pasteurizer variables */
 enum TempEnum {
@@ -252,6 +259,7 @@ struct RunningTime {
 } RunningTime;
 
 struct Flag {
+  bool FlogTimer;
   bool SecondTimer;
   bool MixProgEn;
   bool MixManualEn;
@@ -497,7 +505,7 @@ enum MixerState{
 void out_ctrl(uint8_t enable, uint8_t outnum) {
   switch (outnum) {
     case 1 : {
-      if(enable == ON) digitalWrite(OUT_1, ON);
+      if(enable == ON) {digitalWrite(OUT_1, ON);}
       else digitalWrite(OUT_1, OFF);
     } break;  
     case 2 : {
@@ -517,7 +525,12 @@ void out_ctrl(uint8_t enable, uint8_t outnum) {
       digitalWrite(OUT_2, OFF);
       digitalWrite(OUT_3, OFF);
       digitalWrite(OUT_4, OFF);
+      olog("All outs OFF");
     } break;
+  }
+  if(outnum > 0) {
+    OutState[outnum - 1] = (enable == ON)?(true):(false);
+    olog(String("Out") + outnum + " " + (enable == ON)?("ON"):("OFF"));
   }
 }
 
@@ -563,31 +576,30 @@ uint32_t cycle_time(uint8_t cycle) {
 
 uint32_t prog_time(uint8_t prgNum) {
   uint32_t ret = 0;
-  //DBG_SERIAL.print("prog_time func, prgNum: "); DBG_SERIAL.println(prgNum);
-  //DBG_SERIAL.print("cyclesCount: "); DBG_SERIAL.println(cyclesCount);
   for(int i = 0; i < cyclesCount; i++) {
     ret += cycle_time(i);
-    //DBG_SERIAL.print("cycle_time: "); DBG_SERIAL.println(ret);
   }
   return ret;
 }
 
 void HSecondTimer() {
-  //DBG_SERIAL.println("Half Second timer");
   Flag.HSecond = true;
 }
 
 void SecondTimer() {
   static uint8_t lCycleCount = 0;
-  static uint16_t lCycleTime = 0, lPTime = 0, lRTime = 0, lDirection = FORWARD, lState = MixerWork;
-
-  //DBG_SERIAL.println("Second timer");
+  static uint16_t lCycleTime = 0, lPTime = 0, lRTime = 0, lDirection = FORWARD, lState = MixerWork, lFLogCnt = 0;
 
   Flag.SecondTimer = true;
   Flag.tcUpd = true;
 
   if(PastDelayCnt > 0) {
     PastDelayCnt--;
+  }
+
+  if(++lFLogCnt == FLOG_INTERVAL) {
+    lFLogCnt = 0;
+    Flag.FlogTimer = true;
   }
 
 	if(Flag.InitLocalTimerVar) {
@@ -1077,19 +1089,15 @@ void cbButGUIUpd(NextionEventType type, INextionTouchable *widget) {
   else if (type == NEX_EVENT_POP) {}
 }
 
-bool OutState[4];
-bool OutStatePr[4];
 void cbButOut1(NextionEventType type, INextionTouchable *widget) {
   NEX_SERIAL.flush();
   olog(F("cbButOut1"));
   if (type == NEX_EVENT_PUSH) {
     if(!OutState[0]) {
       out_ctrl(ON, 1);
-      OutState[0] = true;
     }
     else {
       out_ctrl(OFF, 1);
-      OutState[0] = false;
     }
   }
   else if (type == NEX_EVENT_POP) {}
@@ -1101,11 +1109,9 @@ void cbButOut2(NextionEventType type, INextionTouchable *widget) {
   if (type == NEX_EVENT_PUSH) {
     if(!OutState[1]) {
       out_ctrl(ON, 2);
-      OutState[1] = true;
     }
     else {
       out_ctrl(OFF, 2);
-      OutState[1] = false;
     }
   }
   else if (type == NEX_EVENT_POP) {}
@@ -1117,11 +1123,9 @@ void cbButOut3(NextionEventType type, INextionTouchable *widget) {
   if (type == NEX_EVENT_PUSH) {
     if(!OutState[2]) {
       out_ctrl(ON, 3);
-      OutState[2] = true;
     }
     else {
       out_ctrl(OFF, 3);
-      OutState[2] = false;
     }
   }
   else if (type == NEX_EVENT_POP) {}
@@ -1133,11 +1137,9 @@ void cbButOut4(NextionEventType type, INextionTouchable *widget) {
   if (type == NEX_EVENT_PUSH) {
     if(!OutState[3]) {
       out_ctrl(ON, 4);
-      OutState[3] = true;
     }
     else {
       out_ctrl(OFF, 4);
-      OutState[3] = false;
     }
   }
   else if (type == NEX_EVENT_POP) {}
@@ -1403,6 +1405,7 @@ void cbHeatStart(NextionEventType type, INextionTouchable *widget) {
   NEX_SERIAL.flush();
   if (type == NEX_EVENT_PUSH) {
     if(!Flag.HeatingEn) {
+      out_ctrl(ON, 1);
       DBG_SERIAL.println(F("Start heating!"));
       remove_flog(TEMP_LOG_FN);
       switch (HeatingMode) {
@@ -1442,6 +1445,7 @@ void cbHeatStart(NextionEventType type, INextionTouchable *widget) {
       nTxtShirtT.setForegroundColour(NEX_COL_RED);
     }
     else {
+      out_ctrl(OFF, 1);
       DBG_SERIAL.println(F("Stop heating!"));
       olog(F("Stop heating!"));
       Flag.HeatingEn = false;
@@ -1474,13 +1478,12 @@ void cbPHeatShow(NextionEventType type, INextionTouchable *widget) {
 void cbPSettShow(NextionEventType type, INextionTouchable *widget) {
   NEX_SERIAL.flush();
   if (type == NEX_EVENT_PUSH) {
-    nButOut1.setForegroundColour((OutState[0])?(NEX_COL_RED):(NEX_COL_BLACK), false);
-    nButOut2.setForegroundColour((OutState[1])?(NEX_COL_RED):(NEX_COL_BLACK), false);
-    nButOut3.setForegroundColour((OutState[2])?(NEX_COL_RED):(NEX_COL_BLACK), false);
-    nButOut4.setForegroundColour((OutState[3])?(NEX_COL_RED):(NEX_COL_BLACK), false);
+    nPicOut1.setPictureID((OutState[0])?(21):(20));
+    nPicOut2.setPictureID((OutState[1])?(21):(20));
+    nPicOut3.setPictureID((OutState[2])?(21):(20));
+    nPicOut4.setPictureID((OutState[3])?(21):(20));
     nex.refresh();
     NPage = NexPSett;
-    //nex.drawLine(20, 293, 320, 293, NEX_COL_GRAY);
     nSendIPAddress();
   }
   else if (type == NEX_EVENT_POP) {}
@@ -1705,6 +1708,12 @@ void setup() {
 void loop() {
   // Обработка сообщений Nextion дисплея
   nex.poll();
+
+  if((Flag.FlogTimer) && (Flag.HeatingEn)) {    
+    flog(TEMP_LOG_FN, Temperature[Shirt] + String(";") + Temperature[Milk] + ";" + HeatingPWM);
+    Flag.FlogTimer = false;
+  }
+
   if(Flag.SecondTimer) {
     Flag.SecondTimer = false;
 
@@ -1712,8 +1721,7 @@ void loop() {
     Temperature[Shirt] = adcTemp.readADC_SingleEnded(Shirt) * 0.003125;
 
     /* Heating control ***********************************************************************************/ 
-    if(Flag.HeatingEn) {
-      flog(TEMP_LOG_FN, Temperature[Shirt] + String(";") + Temperature[Milk] + ";" + HeatingPWM);
+    if(Flag.HeatingEn) {      
       switch (HeatingMode) {
         case Past: {   
           HeatingPWM = pid(Param.SetPointValue[HeatingMode], Temperature[Milk], PIDData.kP[Agg], PIDData.kI[Agg], PIDData.kD[Agg]);
@@ -1728,6 +1736,7 @@ void loop() {
               if(PastDelayCnt == 0) {
                 HeatingPWM = 0;
                 Flag.HeatingEn = false;
+                out_ctrl(OFF, 1);
               }
             } break;        
             default: break;
@@ -1739,11 +1748,11 @@ void loop() {
         } break;  
 
         case Temp:{
-          // pidKSelect();
           HeatingPWM = pid(Param.SetPointValue[Past], Temperature[Milk], PIDData.kP[Agg], PIDData.kI[Agg], PIDData.kD[Agg]);
           if(Temperature[Milk] >= Param.SetPointValue[HeatingMode]) {
             HeatingPWM = 0;
             Flag.HeatingEn = false;
+            out_ctrl(OFF, 1);
           }
         } break; 
 
@@ -1827,10 +1836,18 @@ void loop() {
           if(OutStatePr[i] != OutState[i]) {
             OutStatePr[i] = OutState[i];
             switch (i) {
-              case 0: { nButOut1.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
-              case 1: { nButOut2.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
-              case 2: { nButOut3.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
-              case 3: { nButOut4.setForegroundColour((OutState[i])?(NEX_COL_RED):(NEX_COL_BLACK));} break;
+              case 0: {
+                nPicOut1.setPictureID((OutState[i])?(21):(20));
+              } break;
+              case 1: {
+                nPicOut2.setPictureID((OutState[i])?(21):(20));
+              } break;
+              case 2: {
+                nPicOut3.setPictureID((OutState[i])?(21):(20));
+              } break;
+              case 3: {
+                nPicOut4.setPictureID((OutState[i])?(21):(20));
+              } break;
               default: break;
             }
           }
