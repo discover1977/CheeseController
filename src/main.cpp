@@ -28,7 +28,7 @@
 
 const String version = "1.2";
 
-#define PICO
+//#define PICO
 
 #define SCREEN_WIDTH    128 // OLED display width, in pixels
 #define SCREEN_HEIGHT   32 // OLED display height, in pixels
@@ -152,7 +152,6 @@ NextionText nTxtPMixS(nex, NexPSett, 4, "tPMixS");
 NextionText nTxtPSettS(nex, NexPSett, 5, "tPSettS");
 
 NextionText nTxtTimePSett(nex, NexPSett, 1, "tTime");
-//NextionSlidingText nSTxtAddr(nex, NexPSett, 8, "stAddr");
 NextionText nTxtStatus(nex, NexPSett, 7, "tStatus");
 NextionButton nButOut1(nex, NexPSett, 12, "bOut1");
 NextionButton nButOut2(nex, NexPSett, 13, "bOut2");
@@ -301,21 +300,19 @@ uint8_t pid(float Set, float Value, float Kp, float Ki, float Kd) {
 	static float Df;
 	static float err_old;
 
-#define DEV 1.0F
-
 	/* Calc current error */
 	pid_error = Set - Value;
 
 #if MY_PID
 	/* Proportional */
-	Pr = (Kp / DEV) * pid_error;
+	Pr = Kp * pid_error;
 
 	/* Integral */
-	In = (In / DEV) + (Ki * pid_error);
+	In = In + (Ki * pid_error);
 	In = constrainF(In, 0.0, 100.0);
 
 	/* Differential */
-	Df = (Kd / DEV) * (pid_error - err_old);
+	Df = Kd * (pid_error - err_old);
 	err_old = pid_error;
 	pid_output = constrainF((Pr + In + Df), 0.0, 100.0);
 #else
@@ -365,9 +362,7 @@ uint8_t pid(float Set, float Value, float Kp, float Ki, float Kd) {
 				pid_output = 0;
 		}
 	}
-
 #endif
-
 	return (uint8_t)(pid_output);
 }
 
@@ -1035,10 +1030,11 @@ char* getMPwrCharArr(int val) {
 }
 
 char* addDeg(char* s) {
-  int i = strlen(s);
-  s[i++] = '°';
+  /*int i = strlen(s);
+  s[i++] = '°'; // ALT + 248
   s[i++] = 'C';
-  s[i] = 0x00;
+  s[i] = 0x00;*/
+  sprintf(s, "%sC\n", "°");
   return s;
 }
 
@@ -1767,8 +1763,9 @@ void loop() {
     Flag.HSecond = false;
     switch(NPage) {
       case NexPHeat: {  // Heating display
-          sprintf(Text, "%s", curTime);
-          nTxtTimePHeat.setText(Text);
+        //sprintf(Text, "%s", curTime);
+        curTime.toCharArray(Text, curTime.length() + 1);
+        nTxtTimePHeat.setText(Text);
         nTxtMilkT.setText(addDeg(dtostrf(Temperature[Milk], 3, 1, Text)));
         nTxtShirtT.setText(addDeg(dtostrf(Temperature[Shirt], 3, 1, Text))); 
         if(Flag.HeatingEn) {
@@ -1798,8 +1795,9 @@ void loop() {
         } 
       } break;
       case NexPMix: { // Mixer display
-          sprintf(Text, "%s", curTime);
-          nTxtTimePMix.setText(Text);
+        //sprintf(Text, "%s", curTime);
+        curTime.toCharArray(Text, curTime.length() + 1);
+        nTxtTimePMix.setText(Text);
         if((Flag.MixProgEn) || (Flag.EndProg)) {      
           sprintf(Text, "%i/%s", (CurrCycle + 1), ((prgCycle[CurrCycle].State == 1)?("W"):("P")));
           nTxtCycleNum.setText(Text);
@@ -1830,7 +1828,8 @@ void loop() {
         }
       } break;
       case NexPSett: {
-          sprintf(Text, "%s", curTime);
+          //sprintf(Text, "%s", curTime);
+          curTime.toCharArray(Text, curTime.length() + 1);
           nTxtTimePSett.setText(Text);
         for(int i = 0 ;i < 4; i++) {
           if(OutStatePr[i] != OutState[i]) {
